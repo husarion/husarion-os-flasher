@@ -7,14 +7,14 @@ import (
 )
 
 // getParentDevice returns the base disk name for a partition.
-// For example, "nvme0n1p2" becomes "nvme0n1" and "sda1" becomes "sda".
+// For example, "nvme0n1p2" becomes "nvme0n1", and "sda1" becomes "sda".
 func getParentDevice(dev string) string {
 	if strings.HasPrefix(dev, "nvme") {
 		if idx := strings.LastIndex(dev, "p"); idx != -1 {
 			return dev[:idx]
 		}
 	}
-	// Remove trailing digits for non-NVMe devices.
+	// For non-NVMe devices, remove trailing digits.
 	i := len(dev) - 1
 	for ; i >= 0; i-- {
 		if dev[i] < '0' || dev[i] > '9' {
@@ -27,8 +27,8 @@ func getParentDevice(dev string) string {
 func getAvailableDevices() ([]string, error) {
 	var devices []string
 
-	// Get lsblk output without header.
-	cmd := exec.Command("lsblk", "-n", "-o", "NAME,MOUNTPOINT")
+	// Run lsblk without header.
+	cmd := exec.Command("lsblk", "-n", "-o", "NAME,MOUNTPOINTS")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -43,19 +43,21 @@ func getAvailableDevices() ([]string, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		// If the MOUNTPOINT is "/" then this device or its partition hosts root.
+		// Check if the mountpoint is exactly "/".
 		if len(fields) >= 2 && fields[1] == "/" {
-			// Remove any tree-drawing characters (like "├─" or "└─") from the device name.
-			cleanName := strings.TrimLeft(fields[0], "├─└")
+			// Remove any non-alphanumeric leading characters (e.g. "|-", "`-", etc.)
+			cleanName := strings.TrimLeftFunc(fields[0], func(r rune) bool {
+				return !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'))
+			})
 			dev := "/dev/" + cleanName
 			rootDevices[dev] = true
-			// Also mark its parent disk.
+			// Mark the underlying disk.
 			parent := "/dev/" + getParentDevice(cleanName)
 			rootDevices[parent] = true
 		}
 	}
 
-	// Iterate over /sys/block entries.
+	// Iterate over /sys/block to list available disks.
 	entries, err := os.ReadDir("/sys/block")
 	if err != nil {
 		return nil, err
@@ -74,5 +76,6 @@ func getAvailableDevices() ([]string, error) {
 			}
 		}
 	}
+
 	return devices, nil
 }
