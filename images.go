@@ -33,8 +33,19 @@ func getImageFiles() ([]string, error) {
 
 func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		progressChan <- progressMsg("Unmounting target device " + dst + " if mounted...")
-		exec.Command("umount", dst).Run()
+		// Unmount all partitions under the selected device (e.g. /dev/sda -> /dev/sda1, /dev/sda2, etc.)
+		progressChan <- progressMsg("Unmounting all partitions under " + dst + " if mounted...")
+
+		// Check if the device is mounted before attempting to unmount
+		checkCmd := exec.Command("sh", "-c", "mount | grep "+dst)
+		if err := checkCmd.Run(); err == nil {
+			// Device is mounted, proceed to unmount
+			if err := exec.Command("sh", "-c", "umount "+dst+"*").Run(); err != nil {
+				progressChan <- progressMsg("Unmount error (ignored): " + err.Error())
+			}
+		} else {
+			progressChan <- progressMsg("No partitions to unmount under " + dst)
+		}
 
 		// Start dd inside a pseudo-terminal so it flushes progress output in real time.
 		cmd := exec.Command("dd", "if="+src, "of="+dst, "bs=1k", "status=progress")
@@ -44,7 +55,7 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 			return nil
 		}
 
-		// Send ddStartedMsg so the model stores cmd for aborting.
+		// Send ddStartedMsg so the model stores the dd command pointer for aborting.
 		progressChan <- ddStartedMsg{cmd: cmd}
 
 		go func() {
@@ -72,8 +83,12 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 				progressChan <- errorMsg{err: fmt.Errorf("dd command failed: %v", err)}
 			} else {
 				progressChan <- progressMsg("Syncing...")
-				exec.Command("sync").Run()
-				progressChan <- doneMsg{}
+				if err := exec.Command("sync").Run(); err != nil {
+					progressChan <- errorMsg{err: fmt.Errorf("sync failed: %v", err)}
+				} else {
+					progressChan <- progressMsg("Sync completed successfully.")
+					progressChan <- doneMsg{}
+				}
 			}
 		}()
 
