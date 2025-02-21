@@ -17,4 +17,4 @@ setup-go:
 build:
     #!/bin/bash
     export PATH=$PATH:/usr/local/go/bin
-    go build -o husarion-image-flasher
+    go build -o husarion-os-flasher

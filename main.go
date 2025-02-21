@@ -305,7 +305,7 @@ func (m model) View() string {
 		Background(lipgloss.Color(colorPantone)).
 		Align(lipgloss.Center).
 		Padding(1, 0)
-	header := headerStyle.Render(" Husarion Image Flasher ")
+	header := headerStyle.Render(" Husarion OS Flasher ")
 
 	// Container for lists.
 	containerStyle := lipgloss.NewStyle().

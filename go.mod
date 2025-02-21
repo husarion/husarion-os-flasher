@@ -1,4 +1,4 @@
-module husarion-image-flasher
+module husarion-os-flasher
 
 go 1.22.0
 
