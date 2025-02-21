@@ -227,7 +227,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Create a new progress channel for this run.
 				m.progressChan = make(chan tea.Msg)
 				m.flashing = true
-				m.logs = append(m.logs, fmt.Sprintf("Starting to flash %s to %s...",
+				m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
 					m.imageList.SelectedItem().(item).value,
 					m.deviceList.SelectedItem().(item).value))
 				return m, tea.Batch(
