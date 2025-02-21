@@ -1,2 +1,4 @@
 # husarion-image-flasher
-A TUI for the Husarion Image Flasher Yocto image
+A TUI for the Husarion Image Flasher USB tool
+
+![tui](tui.png)
