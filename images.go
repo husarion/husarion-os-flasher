@@ -33,6 +33,9 @@ func getImageFiles() ([]string, error) {
 
 func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
+		progressChan <- progressMsg("Unmounting target device " + dst + " if mounted...")
+		exec.Command("umount", dst).Run()
+
 		// Start dd inside a pseudo-terminal so it flushes progress output in real time.
 		cmd := exec.Command("dd", "if="+src, "of="+dst, "bs=1k", "status=progress")
 		ptmx, err := pty.Start(cmd)
@@ -68,6 +71,8 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 			if err := cmd.Wait(); err != nil {
 				progressChan <- errorMsg{err: fmt.Errorf("dd command failed: %v", err)}
 			} else {
+				progressChan <- progressMsg("Syncing...")
+				exec.Command("sync").Run()
 				progressChan <- doneMsg{}
 			}
 		}()
