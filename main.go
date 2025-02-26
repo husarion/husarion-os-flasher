@@ -345,7 +345,7 @@ func (m model) View() string {
 			Padding(0, 2).
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
-			Background(lipgloss.Color(colorLilac))
+			Background(lipgloss.Color(colorAnthracite))
 		buttonText = "Abort"
 	} else {
 		buttonStyle = lipgloss.NewStyle().
@@ -389,19 +389,28 @@ func (m model) View() string {
 		footer,
 	)
 
+	// final := lipgloss.Place(
+	// 	m.width,
+	// 	m.height,
+	// 	lipgloss.Center,
+	// 	lipgloss.Center,
+	// 	ui,
+	// 	lipgloss.WithWhitespaceChars(" "),
+	// 	lipgloss.WithWhitespaceBackground(lipgloss.Color(colorBackground)),
+	// )
 	final := lipgloss.Place(
 		m.width,
 		m.height,
 		lipgloss.Center,
 		lipgloss.Center,
 		ui,
-		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceBackground(lipgloss.Color(colorBackground)),
 	)
 
-	bgStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color(colorBackground)).
-		Foreground(lipgloss.Color(colorWhite))
+	bgStyle := lipgloss.NewStyle()
+
+	// bgStyle := lipgloss.NewStyle().
+	// 	Background(lipgloss.Color(colorBackground)).
+	// 	Foreground(lipgloss.Color(colorWhite))
 	return zone.Scan(bgStyle.Render(final))
 }
 
