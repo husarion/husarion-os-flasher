@@ -160,8 +160,10 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+	// Update ready state at the beginning of every update
+	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
 
+	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -186,10 +188,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case progressMsg:
-		m.logs = append(m.logs, string(msg))
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog(string(msg))
 		if m.flashing {
 			return m, listenProgress(m.progressChan)
 		}
@@ -197,19 +196,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.flashing = false
-		m.logs = append(m.logs, "Done!")
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog("Done!")
 		m.ddCmd = nil
 		return m, nil
 
 	case errorMsg:
 		m.flashing = false
-		m.logs = append(m.logs, fmt.Sprintf("Error: %v", msg.err))
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog(fmt.Sprintf("Error: %v", msg.err))
 		m.ddCmd = nil
 		return m, nil
 
@@ -224,34 +217,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeList = (m.activeList + 1) % 2
 			return m, nil
 		case "enter":
-			if m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil && !m.flashing {
-				// Create a new progress channel for this run.
-				m.progressChan = make(chan tea.Msg)
-				m.flashing = true
-				m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
-					m.imageList.SelectedItem().(item).value,
-					m.deviceList.SelectedItem().(item).value))
-				return m, tea.Batch(
-					writeImage(
-						m.imageList.SelectedItem().(item).value,
-						m.deviceList.SelectedItem().(item).value,
-						m.progressChan,
-					),
-					listenProgress(m.progressChan),
-				)
-			}
+			return m.startFlashing()
 		case "a", "A":
-			if m.flashing && m.ddCmd != nil {
-				err := m.ddCmd.Process.Kill()
-				if err != nil {
-					m.logs = append(m.logs, fmt.Sprintf("Error aborting: %v", err))
-				} else {
-					m.logs = append(m.logs, "Flashing aborted.")
-				}
-				m.flashing = false
-				m.ddCmd = nil
-				return m, nil
-			}
+			return m.abortFlashing()
 		case "ctrl+c", "q", "Q":
 			return m, tea.Quit
 		case "up", "down":
@@ -261,81 +229,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.imageList, _ = m.imageList.Update(msg)
 			}
 		}
+
 	case tea.MouseMsg:
-		// print(msg.Button)
-
-		var keyMsg tea.KeyMsg
-		if msg.Button == tea.MouseButtonWheelUp {
-			if m.activeList == 0 {
-				keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-				m.deviceList, _ = m.deviceList.Update(keyMsg)
-			} else {
-				keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-				m.imageList, _ = m.imageList.Update(keyMsg)
-			}
-		}
-		if msg.Button == tea.MouseButtonWheelDown {
-			if m.activeList == 0 {
-				keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-				m.deviceList, _ = m.deviceList.Update(keyMsg)
-			} else {
-				keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-				m.imageList, _ = m.imageList.Update(keyMsg)
-			}
+		// Handle mouse wheel events
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			return m.handleMouseWheel(msg)
 		}
 
+		// Only process left button clicks
 		if msg.Action == tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
 			return m, nil
 		}
 
+		// Handle flash button clicks
 		if zone.Get("flash-button").InBounds(msg) {
 			if !m.flashing {
-				if m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil && !m.flashing {
-					// Create a new progress channel for this run.
-					m.progressChan = make(chan tea.Msg)
-					m.flashing = true
-					m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
-						m.imageList.SelectedItem().(item).value,
-						m.deviceList.SelectedItem().(item).value))
-					return m, tea.Batch(
-						writeImage(
-							m.imageList.SelectedItem().(item).value,
-							m.deviceList.SelectedItem().(item).value,
-							m.progressChan,
-						),
-						listenProgress(m.progressChan),
-					)
-				}
+				return m.startFlashing()
 			} else {
-				if m.ddCmd != nil {
-					err := m.ddCmd.Process.Kill()
-					if err != nil {
-						m.logs = append(m.logs, fmt.Sprintf("Error aborting: %v", err))
-					} else {
-						m.logs = append(m.logs, "Flashing aborted.")
-					}
-					m.flashing = false
-					m.ddCmd = nil
-				}
+				return m.abortFlashing()
 			}
-
 		}
 
+		// Handle list selection
 		if zone.Get("device-view").InBounds(msg) {
 			m.activeList = 0
-		}
-
-		if zone.Get("image-view").InBounds(msg) {
+		} else if zone.Get("image-view").InBounds(msg) {
 			m.activeList = 1
 		}
-		// x, y := zone.Get("confirm").Pos() can be used to get the relative
-		// coordinates within the zone. Useful if you need to move a cursor in a
-		// input box as an example.
 
 		return m, nil
 	}
 
-	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
 	return m, nil
 }
 
@@ -413,13 +337,16 @@ func (m model) View() string {
 
 	// Flash button.
 	var buttonStyle lipgloss.Style
+	var buttonText string
+
 	if m.flashing {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
 			Padding(0, 2).
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
-			Background(lipgloss.Color(colorAnthracite))
+			Background(lipgloss.Color(colorLilac))
+		buttonText = "Abort"
 	} else {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -427,9 +354,14 @@ func (m model) View() string {
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorPantone))
+		buttonText = "Flash Image"
+
+		if !m.ready {
+			buttonStyle = buttonStyle.Background(lipgloss.Color(colorAnthracite))
+		}
 	}
-	// button := buttonStyle.Render("Flash Image")
-	button := zone.Mark("flash-button", buttonStyle.Render("Flash Image"))
+
+	button := zone.Mark("flash-button", buttonStyle.Render(buttonText))
 
 	// Logs panel.
 	logStyle := lipgloss.NewStyle().
@@ -501,6 +433,77 @@ func listenProgress(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		return <-ch
 	}
+}
+
+// Helper method for adding log entries with overflow protection
+func (m *model) addLog(msg string) {
+	m.logs = append(m.logs, msg)
+	if len(m.logs) > 10 {
+		m.logs = m.logs[1:]
+	}
+}
+
+// Helper method for starting the flashing process
+func (m *model) startFlashing() (tea.Model, tea.Cmd) {
+	if m.deviceList.SelectedItem() == nil || m.imageList.SelectedItem() == nil || m.flashing {
+		return m, nil
+	}
+
+	imagePath := m.imageList.SelectedItem().(item).value
+	devicePath := m.deviceList.SelectedItem().(item).value
+
+	// Create a new progress channel for this run
+	m.progressChan = make(chan tea.Msg)
+	m.flashing = true
+	m.addLog(fmt.Sprintf("> Starting to flash %s to %s...", imagePath, devicePath))
+
+	return m, tea.Batch(
+		writeImage(imagePath, devicePath, m.progressChan),
+		listenProgress(m.progressChan),
+	)
+}
+
+// Helper method for aborting the flashing process
+func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
+	if !m.flashing || m.ddCmd == nil {
+		return m, nil
+	}
+
+	err := m.ddCmd.Process.Kill()
+	if err != nil {
+		m.addLog(fmt.Sprintf("Error aborting: %v", err))
+	} else {
+		m.addLog("Flashing aborted.")
+	}
+
+	m.flashing = false
+	m.ddCmd = nil
+	return m, nil
+}
+
+// Helper method for handling mouse wheel events
+func (m *model) handleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	var keyMsg tea.KeyMsg
+
+	if msg.Button == tea.MouseButtonWheelUp {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		}
+	} else if msg.Button == tea.MouseButtonWheelDown {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		}
+	}
+
+	return m, nil
 }
 
 func main() {
