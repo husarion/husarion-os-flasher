@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 const (
@@ -260,6 +261,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.imageList, _ = m.imageList.Update(msg)
 			}
 		}
+	case tea.MouseMsg:
+		if msg.Action != tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
+			return m, nil
+		}
+
+		if zone.Get("flash-button").InBounds(msg) {
+			if !m.flashing {
+				if m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil && !m.flashing {
+					// Create a new progress channel for this run.
+					m.progressChan = make(chan tea.Msg)
+					m.flashing = true
+					m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
+						m.imageList.SelectedItem().(item).value,
+						m.deviceList.SelectedItem().(item).value))
+					return m, tea.Batch(
+						writeImage(
+							m.imageList.SelectedItem().(item).value,
+							m.deviceList.SelectedItem().(item).value,
+							m.progressChan,
+						),
+						listenProgress(m.progressChan),
+					)
+				}
+			} else {
+				if m.ddCmd != nil {
+					err := m.ddCmd.Process.Kill()
+					if err != nil {
+						m.logs = append(m.logs, fmt.Sprintf("Error aborting: %v", err))
+					} else {
+						m.logs = append(m.logs, "Flashing aborted.")
+					}
+					m.flashing = false
+					m.ddCmd = nil
+				}
+			}
+
+		}
+
+		// x, y := zone.Get("confirm").Pos() can be used to get the relative
+		// coordinates within the zone. Useful if you need to move a cursor in a
+		// input box as an example.
+
+		return m, nil
 	}
 
 	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
@@ -355,7 +399,8 @@ func (m model) View() string {
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorPantone))
 	}
-	button := buttonStyle.Render("Flash Image")
+	// button := buttonStyle.Render("Flash Image")
+	button := zone.Mark("flash-button", buttonStyle.Render("Flash Image"))
 
 	// Logs panel.
 	logStyle := lipgloss.NewStyle().
@@ -396,7 +441,7 @@ func (m model) View() string {
 	bgStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color(colorBackground)).
 		Foreground(lipgloss.Color(colorWhite))
-	return bgStyle.Render(final)
+	return zone.Scan(bgStyle.Render(final))
 }
 
 // getDiskSize returns the size (in bytes) of a disk using "blockdev --getsize64".
@@ -431,6 +476,7 @@ func listenProgress(ch chan tea.Msg) tea.Cmd {
 
 func main() {
 	currentUser, err := user.Current()
+	zone.NewGlobal()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error retrieving user info:", err)
 		os.Exit(1)
