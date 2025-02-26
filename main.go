@@ -262,7 +262,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseMsg:
-		if msg.Action != tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
+		// print(msg.Button)
+
+		var keyMsg tea.KeyMsg
+		if msg.Button == tea.MouseButtonWheelUp {
+			if m.activeList == 0 {
+				keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+				m.deviceList, _ = m.deviceList.Update(keyMsg)
+			} else {
+				keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+				m.imageList, _ = m.imageList.Update(keyMsg)
+			}
+		}
+		if msg.Button == tea.MouseButtonWheelDown {
+			if m.activeList == 0 {
+				keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+				m.deviceList, _ = m.deviceList.Update(keyMsg)
+			} else {
+				keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+				m.imageList, _ = m.imageList.Update(keyMsg)
+			}
+		}
+
+		if msg.Action == tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
 			return m, nil
 		}
 
@@ -299,6 +321,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		}
 
+		if zone.Get("device-view").InBounds(msg) {
+			m.activeList = 0
+		}
+
+		if zone.Get("image-view").InBounds(msg) {
+			m.activeList = 1
+		}
 		// x, y := zone.Get("confirm").Pos() can be used to get the relative
 		// coordinates within the zone. Useful if you need to move a cursor in a
 		// input box as an example.
@@ -367,11 +396,11 @@ func (m model) View() string {
 	deviceView := m.deviceList.View()
 	imageView := m.imageList.View()
 	if m.activeList == 0 {
-		deviceView = activeStyle.Render(deviceView)
-		imageView = inactiveStyle.Render(imageView)
+		deviceView = zone.Mark("device-view", activeStyle.Render(deviceView))
+		imageView = zone.Mark("image-view", inactiveStyle.Render(imageView))
 	} else {
-		deviceView = inactiveStyle.Render(deviceView)
-		imageView = activeStyle.Render(imageView)
+		deviceView = zone.Mark("device-view", inactiveStyle.Render(deviceView))
+		imageView = zone.Mark("image-view", activeStyle.Render(imageView))
 	}
 
 	var listView string
