@@ -1,18 +1,29 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
+	"github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/wish"
+	"github.com/charmbracelet/wish/activeterm"
+	"github.com/charmbracelet/wish/bubbletea"
+	"github.com/charmbracelet/wish/logging"
 	zone "github.com/lrstanley/bubblezone"
 )
 
@@ -49,8 +60,9 @@ type model struct {
 	activeList   int
 	width        int
 	height       int
-	progressChan chan tea.Msg // For streaming dd logs
-	ddCmd        *exec.Cmd    // dd command pointer for aborting
+	progressChan chan tea.Msg  // For streaming dd logs
+	ddCmd        *exec.Cmd     // dd command pointer for aborting
+	zones        *zone.Manager // Add zone manager to the model
 }
 
 type progressMsg string
@@ -63,7 +75,7 @@ type ddStartedMsg struct {
 	cmd *exec.Cmd
 }
 
-func initialModel() model {
+func initialModel(termWidth, termHeight int) model {
 	currentUser, _ := user.Current()
 	if currentUser.Uid != "0" {
 		return model{err: fmt.Errorf("this program must be run as root")}
@@ -90,8 +102,8 @@ func initialModel() model {
 	}
 
 	// Initial list dimensions (will be overridden by window size messages).
-	width := minListWidth
-	height := 10
+	// width := minListWidth
+	// height := 10
 
 	deviceDelegate := list.NewDefaultDelegate()
 	deviceDelegate.Styles.SelectedTitle = deviceDelegate.Styles.SelectedTitle.Foreground(lipgloss.Color(colorPantone))
@@ -101,7 +113,8 @@ func initialModel() model {
 	imageDelegate.Styles.SelectedTitle = imageDelegate.Styles.SelectedTitle.Foreground(lipgloss.Color(colorPantone))
 	imageDelegate.Styles.SelectedDesc = imageDelegate.Styles.SelectedDesc.Foreground(lipgloss.Color(colorPantone))
 
-	deviceList := list.New(deviceItems, deviceDelegate, width, height)
+	// deviceList := list.New(deviceItems, deviceDelegate, width, height)
+	deviceList := list.New(deviceItems, deviceDelegate, termWidth/2, 15)
 	deviceList.Title = "  Select Target Device  "
 	deviceList.SetShowTitle(true)
 	deviceList.SetShowHelp(false)
@@ -112,7 +125,8 @@ func initialModel() model {
 		Background(lipgloss.Color(colorPantone)).
 		Padding(0, 1)
 
-	imageList := list.New(imageItems, imageDelegate, width, height)
+	// imageList := list.New(imageItems, imageDelegate, width, height)
+	imageList := list.New(imageItems, imageDelegate, termWidth/2, 15)
 	imageList.Title = "   Select Image File   "
 	imageList.SetShowTitle(true)
 	imageList.SetShowHelp(false)
@@ -130,6 +144,10 @@ func initialModel() model {
 		tick:         time.Now(),
 		activeList:   0,
 		progressChan: make(chan tea.Msg),
+		// dodane aby dzialal wish
+		width:  termWidth,
+		height: termHeight,
+		zones:  zone.New(), // Initialize zone manager
 	}
 }
 
@@ -160,15 +178,17 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+	// Update ready state at the beginning of every update
+	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
 
+	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		// If the terminal is very narrow, use full width for each list.
 		if m.width < (minListWidth*2 + 6) {
-			m.deviceList.SetWidth(m.width - 4)
-			m.imageList.SetWidth(m.width - 4)
+			m.deviceList.SetWidth(m.width - 2)
+			m.imageList.SetWidth(m.width - 2)
 		} else {
 			listWidth := (m.width - 6) / 2
 			if listWidth < minListWidth {
@@ -186,10 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case progressMsg:
-		m.logs = append(m.logs, string(msg))
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog(string(msg))
 		if m.flashing {
 			return m, listenProgress(m.progressChan)
 		}
@@ -197,19 +214,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.flashing = false
-		m.logs = append(m.logs, "Done!")
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog("Done!")
 		m.ddCmd = nil
 		return m, nil
 
 	case errorMsg:
 		m.flashing = false
-		m.logs = append(m.logs, fmt.Sprintf("Error: %v", msg.err))
-		if len(m.logs) > 10 {
-			m.logs = m.logs[1:]
-		}
+		m.addLog(fmt.Sprintf("Error: %v", msg.err))
 		m.ddCmd = nil
 		return m, nil
 
@@ -224,34 +235,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeList = (m.activeList + 1) % 2
 			return m, nil
 		case "enter":
-			if m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil && !m.flashing {
-				// Create a new progress channel for this run.
-				m.progressChan = make(chan tea.Msg)
-				m.flashing = true
-				m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
-					m.imageList.SelectedItem().(item).value,
-					m.deviceList.SelectedItem().(item).value))
-				return m, tea.Batch(
-					writeImage(
-						m.imageList.SelectedItem().(item).value,
-						m.deviceList.SelectedItem().(item).value,
-						m.progressChan,
-					),
-					listenProgress(m.progressChan),
-				)
-			}
+			return m.startFlashing()
 		case "a", "A":
-			if m.flashing && m.ddCmd != nil {
-				err := m.ddCmd.Process.Kill()
-				if err != nil {
-					m.logs = append(m.logs, fmt.Sprintf("Error aborting: %v", err))
-				} else {
-					m.logs = append(m.logs, "Flashing aborted.")
-				}
-				m.flashing = false
-				m.ddCmd = nil
-				return m, nil
-			}
+			return m.abortFlashing()
 		case "ctrl+c", "q", "Q":
 			return m, tea.Quit
 		case "up", "down":
@@ -261,52 +247,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.imageList, _ = m.imageList.Update(msg)
 			}
 		}
+
 	case tea.MouseMsg:
-		if msg.Action != tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
+		// Handle mouse wheel events
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			return m.handleMouseWheel(msg)
+		}
+
+		// Only process left button clicks
+		if msg.Action == tea.MouseActionRelease || msg.Button != tea.MouseButtonLeft {
 			return m, nil
 		}
 
-		if zone.Get("flash-button").InBounds(msg) {
+		// Handle flash button clicks
+		if m.zones.Get("flash-button").InBounds(msg) {
 			if !m.flashing {
-				if m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil && !m.flashing {
-					// Create a new progress channel for this run.
-					m.progressChan = make(chan tea.Msg)
-					m.flashing = true
-					m.logs = append(m.logs, fmt.Sprintf("> Starting to flash %s to %s...",
-						m.imageList.SelectedItem().(item).value,
-						m.deviceList.SelectedItem().(item).value))
-					return m, tea.Batch(
-						writeImage(
-							m.imageList.SelectedItem().(item).value,
-							m.deviceList.SelectedItem().(item).value,
-							m.progressChan,
-						),
-						listenProgress(m.progressChan),
-					)
-				}
+				return m.startFlashing()
 			} else {
-				if m.ddCmd != nil {
-					err := m.ddCmd.Process.Kill()
-					if err != nil {
-						m.logs = append(m.logs, fmt.Sprintf("Error aborting: %v", err))
-					} else {
-						m.logs = append(m.logs, "Flashing aborted.")
-					}
-					m.flashing = false
-					m.ddCmd = nil
-				}
+				return m.abortFlashing()
 			}
-
 		}
 
-		// x, y := zone.Get("confirm").Pos() can be used to get the relative
-		// coordinates within the zone. Useful if you need to move a cursor in a
-		// input box as an example.
+		// Handle list selection
+		if m.zones.Get("device-view").InBounds(msg) {
+			m.activeList = 0
+		} else if m.zones.Get("image-view").InBounds(msg) {
+			m.activeList = 1
+		}
 
 		return m, nil
 	}
 
-	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
 	return m, nil
 }
 
@@ -367,11 +338,11 @@ func (m model) View() string {
 	deviceView := m.deviceList.View()
 	imageView := m.imageList.View()
 	if m.activeList == 0 {
-		deviceView = activeStyle.Render(deviceView)
-		imageView = inactiveStyle.Render(imageView)
+		deviceView = m.zones.Mark("device-view", activeStyle.Render(deviceView))
+		imageView = m.zones.Mark("image-view", inactiveStyle.Render(imageView))
 	} else {
-		deviceView = inactiveStyle.Render(deviceView)
-		imageView = activeStyle.Render(imageView)
+		deviceView = m.zones.Mark("device-view", inactiveStyle.Render(deviceView))
+		imageView = m.zones.Mark("image-view", activeStyle.Render(imageView))
 	}
 
 	var listView string
@@ -384,6 +355,8 @@ func (m model) View() string {
 
 	// Flash button.
 	var buttonStyle lipgloss.Style
+	var buttonText string
+
 	if m.flashing {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -391,6 +364,7 @@ func (m model) View() string {
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorAnthracite))
+		buttonText = "Abort"
 	} else {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -398,9 +372,14 @@ func (m model) View() string {
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorPantone))
+		buttonText = "Flash Image"
+
+		if !m.ready {
+			buttonStyle = buttonStyle.Background(lipgloss.Color(colorAnthracite))
+		}
 	}
-	// button := buttonStyle.Render("Flash Image")
-	button := zone.Mark("flash-button", buttonStyle.Render("Flash Image"))
+
+	button := m.zones.Mark("flash-button", buttonStyle.Render(buttonText))
 
 	// Logs panel.
 	logStyle := lipgloss.NewStyle().
@@ -428,20 +407,29 @@ func (m model) View() string {
 		footer,
 	)
 
+	// final := lipgloss.Place(
+	// 	m.width,
+	// 	m.height,
+	// 	lipgloss.Center,
+	// 	lipgloss.Center,
+	// 	ui,
+	// 	lipgloss.WithWhitespaceChars(" "),
+	// 	lipgloss.WithWhitespaceBackground(lipgloss.Color(colorBackground)),
+	// )
 	final := lipgloss.Place(
 		m.width,
 		m.height,
 		lipgloss.Center,
 		lipgloss.Center,
 		ui,
-		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceBackground(lipgloss.Color(colorBackground)),
 	)
 
-	bgStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color(colorBackground)).
-		Foreground(lipgloss.Color(colorWhite))
-	return zone.Scan(bgStyle.Render(final))
+	bgStyle := lipgloss.NewStyle()
+
+	// bgStyle := lipgloss.NewStyle().
+	// 	Background(lipgloss.Color(colorBackground)).
+	// 	Foreground(lipgloss.Color(colorWhite))
+	return m.zones.Scan(bgStyle.Render(final))
 }
 
 // getDiskSize returns the size (in bytes) of a disk using "blockdev --getsize64".
@@ -474,9 +462,98 @@ func listenProgress(ch chan tea.Msg) tea.Cmd {
 	}
 }
 
+// Helper method for adding log entries with overflow protection
+func (m *model) addLog(msg string) {
+	m.logs = append(m.logs, msg)
+	if len(m.logs) > 10 {
+		m.logs = m.logs[1:]
+	}
+}
+
+// Helper method for starting the flashing process
+func (m *model) startFlashing() (tea.Model, tea.Cmd) {
+	if m.deviceList.SelectedItem() == nil || m.imageList.SelectedItem() == nil || m.flashing {
+		return m, nil
+	}
+
+	imagePath := m.imageList.SelectedItem().(item).value
+	devicePath := m.deviceList.SelectedItem().(item).value
+
+	// Create a new progress channel for this run
+	m.progressChan = make(chan tea.Msg)
+	m.flashing = true
+	m.addLog(fmt.Sprintf("> Starting to flash %s to %s...", imagePath, devicePath))
+
+	return m, tea.Batch(
+		writeImage(imagePath, devicePath, m.progressChan),
+		listenProgress(m.progressChan),
+	)
+}
+
+// Helper method for aborting the flashing process
+func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
+	if !m.flashing || m.ddCmd == nil {
+		return m, nil
+	}
+
+	err := m.ddCmd.Process.Kill()
+	if err != nil {
+		m.addLog(fmt.Sprintf("Error aborting: %v", err))
+	} else {
+		m.addLog("Flashing aborted.")
+	}
+
+	m.flashing = false
+	m.ddCmd = nil
+	return m, nil
+}
+
+// Helper method for handling mouse wheel events
+func (m *model) handleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	var keyMsg tea.KeyMsg
+
+	if msg.Button == tea.MouseButtonWheelUp {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		}
+	} else if msg.Button == tea.MouseButtonWheelDown {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		}
+	}
+
+	return m, nil
+}
+
+// func main() {
+// 	currentUser, err := user.Current()
+// 	zone.NewGlobal()
+// 	if err != nil {
+// 		fmt.Fprintln(os.Stderr, "Error retrieving user info:", err)
+// 		os.Exit(1)
+// 	}
+// 	if currentUser.Uid != "0" {
+// 		fmt.Fprintln(os.Stderr, "This program must be run as root.")
+// 		os.Exit(1)
+// 	}
+
+// 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+// 	if _, err := p.Run(); err != nil {
+// 		fmt.Printf("Error: %v\n", err)
+// 		os.Exit(1)
+// 	}
+// }
+
 func main() {
 	currentUser, err := user.Current()
-	zone.NewGlobal()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error retrieving user info:", err)
 		os.Exit(1)
@@ -486,9 +563,68 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error: %v\n", err)
+	// Define and parse command-line flags
+	sshPort := flag.Int("port", 2222, "Port number for SSH server (1-65535)")
+
+	// Validate port number
+	if *sshPort < 1 || *sshPort > 65535 {
+		fmt.Fprintf(os.Stderr, "Invalid port number: %d. Must be between 1-65535\n", *sshPort)
 		os.Exit(1)
+	}
+
+	enableSsh := flag.Bool("enable-ssh", false, "Run in SSH server mode")
+	flag.Parse()
+
+	if !*enableSsh {
+		p := tea.NewProgram(initialModel(minListWidth, 15), tea.WithAltScreen(), tea.WithMouseCellMotion())
+		if _, err := p.Run(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// SSH server configuration
+		sshServer, err := wish.NewServer(
+			wish.WithAddress(fmt.Sprintf(":%d", *sshPort)), // SSH port
+			wish.WithHostKeyPath(".ssh/id_ed25519"),
+			wish.WithMiddleware(
+				bubbletea.Middleware(func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+					pty, _, _ := s.Pty() // Get terminal dimensions
+					return initialModel(pty.Window.Width, pty.Window.Height), []tea.ProgramOption{
+						tea.WithAltScreen(),       // Keep your existing options
+						tea.WithMouseCellMotion(), // Keep mouse support
+					}
+				}),
+				activeterm.Middleware(), // Bubble Tea apps usually require a PTY.
+				logging.Middleware(),
+			),
+		)
+
+		if err != nil {
+			fmt.Println("Error creating server:", err)
+			os.Exit(1)
+		}
+
+		done := make(chan os.Signal, 1)
+		signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+		log.Info("Starting SSH server")
+
+		// Start SSH server
+		fmt.Println("Starting SSH server on port", *sshPort, "...")
+		go func() {
+			if err = sshServer.ListenAndServe(); err != nil {
+				fmt.Println("Error starting server:", err)
+				// os.Exit(1)
+				done <- nil
+			}
+		}()
+
+		<-done
+
+		log.Info("Stopping SSH server")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer func() { cancel() }()
+		if err := sshServer.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			log.Error("Could not stop server", "error", err)
+		}
 	}
 }
