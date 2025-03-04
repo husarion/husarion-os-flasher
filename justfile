@@ -18,3 +18,18 @@ build:
     #!/bin/bash
     export PATH=$PATH:/usr/local/go/bin
     go build -o husarion-os-flasher
+
+rebuild-on-save:
+    #!/bin/bash
+    export PATH=$PATH:/usr/local/go/bin
+    while true; do
+        go build -o husarion-os-flasher && sudo pkill -f './husarion-os-flasher'
+        inotifywait -e modify $(find . -name '*.go') || exit
+    done
+
+restart-on-build:
+    #!/bin/bash
+    export PATH=$PATH:/usr/local/go/bin
+    while true; do
+        ./husarion-os-flasher
+    done
