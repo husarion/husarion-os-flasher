@@ -51,20 +51,21 @@ func (i item) Description() string { return i.desc }
 func (i item) FilterValue() string { return i.title }
 
 type model struct {
-	deviceList   list.Model
-	imageList    list.Model
-	viewport     viewport.Model
-	ready        bool
-	flashing     bool
-	logs         []string
-	err          error
-	tick         time.Time
-	activeList   int
-	width        int
-	height       int
-	progressChan chan tea.Msg  // For streaming dd logs
-	ddCmd        *exec.Cmd     // dd command pointer for aborting
-	zones        *zone.Manager // Add zone manager to the model
+	deviceList        list.Model
+	imageList         list.Model
+	viewport          viewport.Model
+	ready             bool
+	flashing          bool
+	configuringEeprom bool
+	logs              []string
+	err               error
+	tick              time.Time
+	activeList        int
+	width             int
+	height            int
+	progressChan      chan tea.Msg  // For streaming dd logs
+	ddCmd             *exec.Cmd     // dd command pointer for aborting
+	zones             *zone.Manager // Add zone manager to the model
 	// content      string
 }
 
@@ -76,6 +77,11 @@ type tickMsg time.Time
 // ddStartedMsg carries the dd command pointer for aborting.
 type ddStartedMsg struct {
 	cmd *exec.Cmd
+}
+
+// Add this with your other message types
+type eepromConfigMsg struct {
+	output []string
 }
 
 func initialModel(termWidth, termHeight int) model {
@@ -236,6 +242,12 @@ func getDiskSize(device string) (int64, error) {
 	return strconv.ParseInt(sizeStr, 10, 64)
 }
 
+func isRaspberryPi() bool {
+	_, err := exec.Command("grep", "-q", "Raspberry Pi", "/proc/cpuinfo").Output()
+	// _, err := exec.Command("grep", "-q", "Intel", "/proc/cpuinfo").Output()
+	return err == nil
+}
+
 // formatBytes returns a human-friendly string for a byte count.
 func formatBytes(b int64) string {
 	const unit = 1024
@@ -285,6 +297,33 @@ func (m *model) startFlashing() (tea.Model, tea.Cmd) {
 		writeImage(imagePath, devicePath, m.progressChan),
 		listenProgress(m.progressChan),
 	)
+}
+
+func (m *model) configEeprom() (tea.Model, tea.Cmd) {
+	if m.configuringEeprom {
+		return m, nil
+	}
+
+	m.addLog("> Starting EEPROM configuration...")
+	m.configuringEeprom = true
+
+	// Create a function to run the EEPROM configuration command and capture its output
+	return m, func() tea.Msg {
+		// Replace this with actual EEPROM configuration command
+		// cmd := exec.Command("ls", "-la")
+
+		// For real implementation, use something like:
+		cmd := exec.Command("rpi-eeprom-config", "--apply", "/tmp/boot.conf")
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return errorMsg{err: fmt.Errorf("error configuring EEPROM: %w", err)}
+		}
+
+		// Process the output and return it as a message
+		lines := strings.Split(string(output), "\n")
+		return eepromConfigMsg{output: lines}
+	}
 }
 
 // Helper method for aborting the flashing process
@@ -356,6 +395,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errorMsg:
 		m.flashing = false
+		m.configuringEeprom = false
 		m.addLog(fmt.Sprintf("Error: %v", msg.err))
 		m.ddCmd = nil
 		return m, nil
@@ -416,6 +456,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.zones.Get("eeprom-button").InBounds(msg) {
+			return m.configEeprom()
+		}
 		// Handle list selection
 		if m.zones.Get("device-view").InBounds(msg) {
 			m.activeList = 0
@@ -425,6 +468,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeList = 2
 		}
 
+		return m, nil
+
+	case eepromConfigMsg:
+		for _, line := range msg.output {
+			if line != "" { // Skip empty lines
+				m.addLog(line)
+			}
+		}
+		m.configuringEeprom = false
 		return m, nil
 	}
 
@@ -543,7 +595,7 @@ func (m model) View() string {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
 			Padding(1, 1).
-			Margin(1, 0).
+			Margin(1, 1).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorAnthracite))
 		buttonText = "   Abort   "
@@ -551,7 +603,7 @@ func (m model) View() string {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
 			Padding(1, 1).
-			Margin(1, 0).
+			Margin(1, 1).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorPantone))
 		buttonText = "Flash Image"
@@ -562,6 +614,24 @@ func (m model) View() string {
 	}
 
 	button := m.zones.Mark("flash-button", buttonStyle.Render(buttonText))
+
+	// button that is visible only if "grep -q "Raspberry Pi" /proc/cpuinfo" returns true
+	var buttonView string
+
+	if isRaspberryPi() {
+		buttonStyle = lipgloss.NewStyle().
+			Bold(true).
+			Padding(1, 1).
+			Margin(1, 1).
+			Foreground(lipgloss.Color(colorWhite)).
+			Background(lipgloss.Color(colorLilac))
+
+		buttonEeprom := m.zones.Mark("eeprom-button", buttonStyle.Render("Config EEPROM"))
+
+		buttonView = lipgloss.JoinHorizontal(lipgloss.Center, button, buttonEeprom)
+	} else {
+		buttonView = button
+	}
 
 	// Footer.
 	footerStyle := lipgloss.NewStyle().
@@ -574,7 +644,7 @@ func (m model) View() string {
 		header,
 		listView,
 		infoPanel,
-		button,
+		buttonView,
 		viewportView,
 		viewportProgressView,
 		footer,
