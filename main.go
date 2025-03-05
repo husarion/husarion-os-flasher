@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
@@ -36,7 +37,7 @@ const (
 	colorLightRed   = "#ED3B42"
 
 	// Minimal width for each selection window.
-	minListWidth = 100
+	minListWidth = 50
 )
 
 type item struct {
@@ -52,6 +53,7 @@ func (i item) FilterValue() string { return i.title }
 type model struct {
 	deviceList   list.Model
 	imageList    list.Model
+	viewport     viewport.Model
 	ready        bool
 	flashing     bool
 	logs         []string
@@ -63,6 +65,7 @@ type model struct {
 	progressChan chan tea.Msg  // For streaming dd logs
 	ddCmd        *exec.Cmd     // dd command pointer for aborting
 	zones        *zone.Manager // Add zone manager to the model
+	// content      string
 }
 
 type progressMsg string
@@ -80,6 +83,13 @@ func initialModel(termWidth, termHeight int) model {
 	if currentUser.Uid != "0" {
 		return model{err: fmt.Errorf("this program must be run as root")}
 	}
+
+	// // Load some text for our viewport
+	// content, err := os.ReadFile("artichoke.md")
+	// if err != nil {
+	// 	fmt.Println("could not load file:", err)
+	// 	os.Exit(1)
+	// }
 
 	// Get available devices and images.
 	devices, err := getAvailableDevices()
@@ -114,7 +124,8 @@ func initialModel(termWidth, termHeight int) model {
 	imageDelegate.Styles.SelectedDesc = imageDelegate.Styles.SelectedDesc.Foreground(lipgloss.Color(colorPantone))
 
 	// deviceList := list.New(deviceItems, deviceDelegate, width, height)
-	deviceList := list.New(deviceItems, deviceDelegate, termWidth/2, 15)
+	// deviceList := list.New(deviceItems, deviceDelegate, termWidth/2, 7)
+	deviceList := list.New(deviceItems, deviceDelegate, termWidth, 7)
 	deviceList.Title = "  Select Target Device  "
 	deviceList.SetShowTitle(true)
 	deviceList.SetShowHelp(false)
@@ -126,8 +137,9 @@ func initialModel(termWidth, termHeight int) model {
 		Padding(0, 1)
 
 	// imageList := list.New(imageItems, imageDelegate, width, height)
-	imageList := list.New(imageItems, imageDelegate, termWidth/2, 15)
-	imageList.Title = "   Select Image File   "
+	// imageList := list.New(imageItems, imageDelegate, termWidth/2, 7)
+	imageList := list.New(imageItems, imageDelegate, termWidth, 7)
+	imageList.Title = "    Select Image File   "
 	imageList.SetShowTitle(true)
 	imageList.SetShowHelp(false)
 	imageList.SetFilteringEnabled(false)
@@ -137,6 +149,12 @@ func initialModel(termWidth, termHeight int) model {
 		Background(lipgloss.Color(colorPantone)).
 		Padding(0, 1)
 
+	viewport := viewport.New(termWidth, 7)
+	// viewport.MouseWheelEnabled = true
+	// viewport.YPosition = 0
+	viewport.SetContent("Logs:\n")
+	// viewport.SetContent(string(content))
+
 	return model{
 		deviceList:   deviceList,
 		imageList:    imageList,
@@ -145,9 +163,11 @@ func initialModel(termWidth, termHeight int) model {
 		activeList:   0,
 		progressChan: make(chan tea.Msg),
 		// dodane aby dzialal wish
-		width:  termWidth,
-		height: termHeight,
-		zones:  zone.New(), // Initialize zone manager
+		width:    termWidth,
+		height:   termHeight,
+		zones:    zone.New(), // Initialize zone manager
+		viewport: viewport,
+		// content:  string(content),
 	}
 }
 
@@ -171,13 +191,139 @@ func (m *model) refresh() {
 	}
 }
 
+// Helper method for handling mouse wheel events
+func (m *model) handleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	var keyMsg tea.KeyMsg
+
+	if msg.Button == tea.MouseButtonWheelUp {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else if m.activeList == 1 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		} else if m.activeList == 2 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(keyMsg)
+			return m, cmd // Return the command!
+		}
+	} else if msg.Button == tea.MouseButtonWheelDown {
+		if m.activeList == 0 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.deviceList, _ = m.deviceList.Update(keyMsg)
+		} else if m.activeList == 1 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.imageList, _ = m.imageList.Update(keyMsg)
+		} else if m.activeList == 2 {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			var cmd tea.Cmd
+			m.viewport, cmd = m.viewport.Update(keyMsg)
+			return m, cmd // Return the command!
+		}
+	}
+
+	return m, nil
+}
+
+// getDiskSize returns the size (in bytes) of a disk using "blockdev --getsize64".
+func getDiskSize(device string) (int64, error) {
+	out, err := exec.Command("blockdev", "--getsize64", device).Output()
+	if err != nil {
+		return 0, err
+	}
+	sizeStr := strings.TrimSpace(string(out))
+	return strconv.ParseInt(sizeStr, 10, 64)
+}
+
+// formatBytes returns a human-friendly string for a byte count.
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func listenProgress(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return <-ch
+	}
+}
+
+// Helper method for adding log entries with overflow protection
+func (m *model) addLog(msg string) {
+	m.logs = append(m.logs, msg)
+	// if len(m.logs) > 10 {
+	// 	m.logs = m.logs[1:]
+	// }
+	m.viewport.SetContent("Logs:\n" + strings.Join(m.logs, "\n"))
+	m.viewport.GotoBottom()
+}
+
+// Helper method for starting the flashing process
+func (m *model) startFlashing() (tea.Model, tea.Cmd) {
+	if m.deviceList.SelectedItem() == nil || m.imageList.SelectedItem() == nil || m.flashing {
+		return m, nil
+	}
+
+	imagePath := m.imageList.SelectedItem().(item).value
+	devicePath := m.deviceList.SelectedItem().(item).value
+
+	// Create a new progress channel for this run
+	m.progressChan = make(chan tea.Msg)
+	m.flashing = true
+	m.logs = nil
+	m.addLog(fmt.Sprintf("> Starting to flash %s to %s...", imagePath, devicePath))
+
+	return m, tea.Batch(
+		writeImage(imagePath, devicePath, m.progressChan),
+		listenProgress(m.progressChan),
+	)
+}
+
+// Helper method for aborting the flashing process
+func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
+	if !m.flashing || m.ddCmd == nil {
+		return m, nil
+	}
+
+	err := m.ddCmd.Process.Kill()
+	if err != nil {
+		m.addLog(fmt.Sprintf("Error aborting: %v", err))
+	} else {
+		m.addLog("Flashing aborted.")
+	}
+
+	m.flashing = false
+	m.ddCmd = nil
+	return m, nil
+}
+
+// ==============================================================
+// Init
+// ==============================================================
+
 func (m model) Init() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
+// ==============================================================
+// Update
+// ==============================================================
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var (
+		cmd  tea.Cmd
+		cmds []tea.Cmd
+	)
 	// Update ready state at the beginning of every update
 	m.ready = (m.deviceList.SelectedItem() != nil && m.imageList.SelectedItem() != nil)
 
@@ -185,18 +331,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// If the terminal is very narrow, use full width for each list.
-		if m.width < (minListWidth*2 + 6) {
-			m.deviceList.SetWidth(m.width - 2)
-			m.imageList.SetWidth(m.width - 2)
-		} else {
-			listWidth := (m.width - 6) / 2
-			if listWidth < minListWidth {
-				listWidth = minListWidth
-			}
-			m.deviceList.SetWidth(listWidth)
-			m.imageList.SetWidth(listWidth)
-		}
+
+		m.viewport.Width = msg.Width - 4
 		return m, nil
 
 	case tickMsg:
@@ -231,8 +367,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "tab", "right", "left":
-			m.activeList = (m.activeList + 1) % 2
+		case "tab":
+			m.activeList = (m.activeList + 1) % 3
 			return m, nil
 		case "enter":
 			return m.startFlashing()
@@ -240,11 +376,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.abortFlashing()
 		case "ctrl+c", "q", "Q":
 			return m, tea.Quit
-		case "up", "down":
+		case "left", "right", "up", "down":
+			var keyMsg tea.KeyMsg
+			keyMsg = msg
+			if msg.String() == "left" {
+				keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			}
+			if msg.String() == "right" {
+				keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			}
+
 			if m.activeList == 0 {
-				m.deviceList, _ = m.deviceList.Update(msg)
-			} else {
-				m.imageList, _ = m.imageList.Update(msg)
+				m.deviceList, _ = m.deviceList.Update(keyMsg)
+			} else if m.activeList == 1 {
+				m.imageList, _ = m.imageList.Update(keyMsg)
+			} else if m.activeList == 2 {
+				m.viewport, cmd = m.viewport.Update(keyMsg)
+				cmds = append(cmds, cmd)
 			}
 		}
 
@@ -273,13 +421,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeList = 0
 		} else if m.zones.Get("image-view").InBounds(msg) {
 			m.activeList = 1
+		} else if m.zones.Get("viewport-view").InBounds(msg) {
+			m.activeList = 2
 		}
 
 		return m, nil
 	}
 
-	return m, nil
+	// m.viewport.SetContent(string(m.content))
+	// return m, nil
+	return m, tea.Batch(cmds...)
 }
+
+// ==============================================================
+// View
+// ==============================================================
 
 func (m model) View() string {
 	if m.err != nil {
@@ -319,14 +475,14 @@ func (m model) View() string {
 		Foreground(lipgloss.Color(colorWhite)).
 		Background(lipgloss.Color(colorPantone)).
 		Align(lipgloss.Center).
-		Padding(1, 0)
+		Padding(0, 0)
 	header := headerStyle.Render(" Husarion OS Flasher ")
 
 	// Container for lists.
 	containerStyle := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color(colorLilac)).
-		Padding(1, 2)
+		Padding(0, 0)
 
 	activeStyle := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
@@ -337,12 +493,38 @@ func (m model) View() string {
 
 	deviceView := m.deviceList.View()
 	imageView := m.imageList.View()
+
+	viewportView := m.viewport.View()
+
+	// Create a more visual progress indicator
+
+	viewportProgressStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(colorWhite)).
+		// Background(lipgloss.Color(colorAnthracite)).
+		Padding(0, 1).
+		MarginTop(0).
+		Width(m.viewport.Width).
+		Align(lipgloss.Right)
+
+	// Calculate scroll percentage
+	scrollPercent := int(m.viewport.ScrollPercent() * 100)
+	var viewportProgressView string
+
+	progressBar := fmt.Sprintf("%d%%", scrollPercent)
+	viewportProgressView = viewportProgressStyle.Render(progressBar)
+
 	if m.activeList == 0 {
 		deviceView = m.zones.Mark("device-view", activeStyle.Render(deviceView))
 		imageView = m.zones.Mark("image-view", inactiveStyle.Render(imageView))
-	} else {
+		viewportView = m.zones.Mark("viewport-view", inactiveStyle.Render(viewportView))
+	} else if m.activeList == 1 {
 		deviceView = m.zones.Mark("device-view", inactiveStyle.Render(deviceView))
 		imageView = m.zones.Mark("image-view", activeStyle.Render(imageView))
+		viewportView = m.zones.Mark("viewport-view", inactiveStyle.Render(viewportView))
+	} else if m.activeList == 2 {
+		deviceView = m.zones.Mark("device-view", inactiveStyle.Render(deviceView))
+		imageView = m.zones.Mark("image-view", inactiveStyle.Render(imageView))
+		viewportView = m.zones.Mark("viewport-view", activeStyle.Render(viewportView))
 	}
 
 	var listView string
@@ -360,15 +542,15 @@ func (m model) View() string {
 	if m.flashing {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
-			Padding(0, 2).
+			Padding(1, 1).
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorAnthracite))
-		buttonText = "Abort"
+		buttonText = "   Abort   "
 	} else {
 		buttonStyle = lipgloss.NewStyle().
 			Bold(true).
-			Padding(0, 2).
+			Padding(1, 1).
 			Margin(1, 0).
 			Foreground(lipgloss.Color(colorWhite)).
 			Background(lipgloss.Color(colorPantone))
@@ -380,16 +562,6 @@ func (m model) View() string {
 	}
 
 	button := m.zones.Mark("flash-button", buttonStyle.Render(buttonText))
-
-	// Logs panel.
-	logStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(colorLightRed)).
-		Padding(0, 1).
-		MarginTop(1).
-		Width(m.width - 4)
-	logView := "Logs:\n" + strings.Join(m.logs, "\n")
-	logPanel := logStyle.Render(logView)
 
 	// Footer.
 	footerStyle := lipgloss.NewStyle().
@@ -403,9 +575,12 @@ func (m model) View() string {
 		listView,
 		infoPanel,
 		button,
-		logPanel,
+		viewportView,
+		viewportProgressView,
 		footer,
 	)
+
+	// _ = infoPanel
 
 	// final := lipgloss.Place(
 	// 	m.width,
@@ -432,127 +607,12 @@ func (m model) View() string {
 	return m.zones.Scan(bgStyle.Render(final))
 }
 
-// getDiskSize returns the size (in bytes) of a disk using "blockdev --getsize64".
-func getDiskSize(device string) (int64, error) {
-	out, err := exec.Command("blockdev", "--getsize64", device).Output()
-	if err != nil {
-		return 0, err
-	}
-	sizeStr := strings.TrimSpace(string(out))
-	return strconv.ParseInt(sizeStr, 10, 64)
-}
-
-// formatBytes returns a human-friendly string for a byte count.
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-func listenProgress(ch chan tea.Msg) tea.Cmd {
-	return func() tea.Msg {
-		return <-ch
-	}
-}
-
-// Helper method for adding log entries with overflow protection
-func (m *model) addLog(msg string) {
-	m.logs = append(m.logs, msg)
-	if len(m.logs) > 10 {
-		m.logs = m.logs[1:]
-	}
-}
-
-// Helper method for starting the flashing process
-func (m *model) startFlashing() (tea.Model, tea.Cmd) {
-	if m.deviceList.SelectedItem() == nil || m.imageList.SelectedItem() == nil || m.flashing {
-		return m, nil
-	}
-
-	imagePath := m.imageList.SelectedItem().(item).value
-	devicePath := m.deviceList.SelectedItem().(item).value
-
-	// Create a new progress channel for this run
-	m.progressChan = make(chan tea.Msg)
-	m.flashing = true
-	m.addLog(fmt.Sprintf("> Starting to flash %s to %s...", imagePath, devicePath))
-
-	return m, tea.Batch(
-		writeImage(imagePath, devicePath, m.progressChan),
-		listenProgress(m.progressChan),
-	)
-}
-
-// Helper method for aborting the flashing process
-func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
-	if !m.flashing || m.ddCmd == nil {
-		return m, nil
-	}
-
-	err := m.ddCmd.Process.Kill()
-	if err != nil {
-		m.addLog(fmt.Sprintf("Error aborting: %v", err))
-	} else {
-		m.addLog("Flashing aborted.")
-	}
-
-	m.flashing = false
-	m.ddCmd = nil
-	return m, nil
-}
-
-// Helper method for handling mouse wheel events
-func (m *model) handleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	var keyMsg tea.KeyMsg
-
-	if msg.Button == tea.MouseButtonWheelUp {
-		if m.activeList == 0 {
-			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-			m.deviceList, _ = m.deviceList.Update(keyMsg)
-		} else {
-			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-			m.imageList, _ = m.imageList.Update(keyMsg)
-		}
-	} else if msg.Button == tea.MouseButtonWheelDown {
-		if m.activeList == 0 {
-			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-			m.deviceList, _ = m.deviceList.Update(keyMsg)
-		} else {
-			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-			m.imageList, _ = m.imageList.Update(keyMsg)
-		}
-	}
-
-	return m, nil
-}
-
-// func main() {
-// 	currentUser, err := user.Current()
-// 	zone.NewGlobal()
-// 	if err != nil {
-// 		fmt.Fprintln(os.Stderr, "Error retrieving user info:", err)
-// 		os.Exit(1)
-// 	}
-// 	if currentUser.Uid != "0" {
-// 		fmt.Fprintln(os.Stderr, "This program must be run as root.")
-// 		os.Exit(1)
-// 	}
-
-// 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
-// 	if _, err := p.Run(); err != nil {
-// 		fmt.Printf("Error: %v\n", err)
-// 		os.Exit(1)
-// 	}
-// }
+// ==============================================================
+// main
+// ==============================================================
 
 func main() {
+
 	currentUser, err := user.Current()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error retrieving user info:", err)
