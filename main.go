@@ -313,7 +313,7 @@ func (m *model) configEeprom() (tea.Model, tea.Cmd) {
 		// cmd := exec.Command("ls", "-la")
 
 		// For real implementation, use something like:
-		cmd := exec.Command("rpi-eeprom-config", "--apply", "/tmp/boot.conf")
+		cmd := exec.Command("rpi-eeprom-config", "--apply", "/etc/boot.conf")
 
 		output, err := cmd.CombinedOutput()
 		if err != nil {
