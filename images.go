@@ -48,7 +48,7 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 		}
 
 		// Start dd inside a pseudo-terminal so it flushes progress output in real time.
-		cmd := exec.Command("dd", "if="+src, "of="+dst, "bs=1k", "status=progress")
+		cmd := exec.Command("dd", "if="+src, "of="+dst, "bs=1M", "status=progress")
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			progressChan <- errorMsg{err: fmt.Errorf("failed to start dd command: %v", err)}
