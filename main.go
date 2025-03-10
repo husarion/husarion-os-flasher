@@ -66,7 +66,7 @@ type model struct {
 	progressChan      chan tea.Msg  // For streaming dd logs
 	ddCmd             *exec.Cmd     // dd command pointer for aborting
 	zones             *zone.Manager // Add zone manager to the model
-	// content      string
+	osImgPath         string        // Store the image path for refreshes
 }
 
 type progressMsg string
@@ -84,25 +84,18 @@ type eepromConfigMsg struct {
 	output []string
 }
 
-func initialModel(termWidth, termHeight int) model {
+func initialModel(osImgPath string, termWidth, termHeight int) model {
 	currentUser, _ := user.Current()
 	if currentUser.Uid != "0" {
 		return model{err: fmt.Errorf("this program must be run as root")}
 	}
-
-	// // Load some text for our viewport
-	// content, err := os.ReadFile("artichoke.md")
-	// if err != nil {
-	// 	fmt.Println("could not load file:", err)
-	// 	os.Exit(1)
-	// }
 
 	// Get available devices and images.
 	devices, err := getAvailableDevices()
 	if err != nil {
 		return model{err: err}
 	}
-	images, err := getImageFiles()
+	images, err := getImageFiles(osImgPath)
 	if err != nil {
 		return model{err: err}
 	}
@@ -169,10 +162,11 @@ func initialModel(termWidth, termHeight int) model {
 		activeList:   0,
 		progressChan: make(chan tea.Msg),
 		// dodane aby dzialal wish
-		width:    termWidth,
-		height:   termHeight,
-		zones:    zone.New(), // Initialize zone manager
-		viewport: viewport,
+		width:     termWidth,
+		height:    termHeight,
+		zones:     zone.New(), // Initialize zone manager
+		viewport:  viewport,
+		osImgPath: osImgPath,
 		// content:  string(content),
 	}
 }
@@ -187,7 +181,7 @@ func (m *model) refresh() {
 		m.deviceList.SetItems(deviceItems)
 	}
 
-	images, err := getImageFiles()
+	images, err := getImageFiles(m.osImgPath)
 	if err == nil {
 		var imageItems []list.Item
 		for _, img := range images {
@@ -270,10 +264,23 @@ func listenProgress(ch chan tea.Msg) tea.Cmd {
 
 // Helper method for adding log entries with overflow protection
 func (m *model) addLog(msg string) {
-	m.logs = append(m.logs, msg)
-	// if len(m.logs) > 10 {
-	// 	m.logs = m.logs[1:]
-	// }
+	// Check if this is a progress message from pv
+	if strings.Contains(msg, "%") && strings.Contains(msg, "B/s") {
+		// If we already have logs and the last one was a progress message,
+		// replace it instead of adding a new log entry
+		if len(m.logs) > 0 && strings.Contains(m.logs[len(m.logs)-1], "%") &&
+			strings.Contains(m.logs[len(m.logs)-1], "B/s") {
+			m.logs[len(m.logs)-1] = msg // Replace the last progress entry
+		} else {
+			// First progress message or previous entry was not a progress message
+			m.logs = append(m.logs, msg)
+		}
+	} else {
+		// Regular log message, just append
+		m.logs = append(m.logs, msg)
+	}
+
+	// Update the viewport content with all logs
 	m.viewport.SetContent("Logs:\n" + strings.Join(m.logs, "\n"))
 	m.viewport.GotoBottom()
 }
@@ -695,6 +702,7 @@ func main() {
 
 	// Define and parse command-line flags
 	sshPort := flag.Int("port", 2222, "Port number for SSH server (1-65535)")
+	osImgPath := flag.String("os-img-path", ".", "Path to OS image files directory")
 
 	// Validate port number
 	if *sshPort < 1 || *sshPort > 65535 {
@@ -706,7 +714,7 @@ func main() {
 	flag.Parse()
 
 	if !*enableSsh {
-		p := tea.NewProgram(initialModel(minListWidth, 15), tea.WithAltScreen(), tea.WithMouseCellMotion())
+		p := tea.NewProgram(initialModel(*osImgPath, minListWidth, 15), tea.WithAltScreen(), tea.WithMouseCellMotion())
 		if _, err := p.Run(); err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -719,7 +727,7 @@ func main() {
 			wish.WithMiddleware(
 				bubbletea.Middleware(func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 					pty, _, _ := s.Pty() // Get terminal dimensions
-					return initialModel(pty.Window.Width, pty.Window.Height), []tea.ProgramOption{
+					return initialModel(*osImgPath, pty.Window.Width, pty.Window.Height), []tea.ProgramOption{
 						tea.WithAltScreen(),       // Keep your existing options
 						tea.WithMouseCellMotion(), // Keep mouse support
 					}
