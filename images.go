@@ -14,17 +14,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func getImageFiles() ([]string, error) {
-	var images []string
-
-	entries, err := os.ReadDir("/os-images")
+func getImageFiles(osImgPath string) ([]string, error) {
+	// Use osImgPath instead of hardcoded "/os-images"
+	entries, err := os.ReadDir(osImgPath)
 	if err != nil {
 		return nil, err
 	}
 
+	var images []string
 	for _, entry := range entries {
 		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".img" {
-			images = append(images, filepath.Join("/os-images", entry.Name()))
+			images = append(images, filepath.Join(osImgPath, entry.Name()))
 		}
 	}
 
@@ -48,7 +48,7 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 		}
 
 		// Start dd inside a pseudo-terminal so it flushes progress output in real time.
-		cmd := exec.Command("dd", "if="+src, "of="+dst, "bs=1k", "status=progress")
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("pv %s | dd of=%s bs=1k", src, dst))
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			progressChan <- errorMsg{err: fmt.Errorf("failed to start dd command: %v", err)}
