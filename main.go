@@ -414,6 +414,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "esc": // hit Esc → run 'shutdown -Ph now' (requires root)
+			// fire-and-forget so UI can exit immediately
+			go func() {
+				cmd := exec.Command("shutdown", "-Ph", "now")
+				// optional: surface any error; omit if you prefer silence
+				if err := cmd.Run(); err != nil {
+					m.addLog(fmt.Sprintf("shutdown failed: %v", err))
+				}
+			}()
+
+			return m, tea.Quit
 		case "tab":
 			m.activeList = (m.activeList + 1) % 3
 			return m, nil
@@ -645,7 +656,7 @@ func (m model) View() string {
 		Foreground(lipgloss.Color(colorWhite)).
 		Align(lipgloss.Center).
 		MarginTop(1)
-	footer := footerStyle.Render("Press TAB to switch, ↑↓ to select the device/image, ENTER to flash, A to abort, Q to quit.")
+	footer := footerStyle.Render("TAB to switch • ↑↓ to navigate • ENTER to flash • A to abort • ESC to power-off • Q to quit.")
 
 	ui := lipgloss.JoinVertical(lipgloss.Center,
 		header,
