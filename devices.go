@@ -108,7 +108,7 @@ func getAvailableDevices() ([]string, error) {
 		devicePath := "/dev/" + name
 
 		// Skip loop and ram devices.
-		if !strings.HasPrefix(name, "loop") && !strings.HasPrefix(name, "ram") && !strings.HasPrefix(name, "sda") {
+		if !strings.HasPrefix(name, "loop") && !strings.HasPrefix(name, "ram") {
 			// Skip if this device is a root device or its partition is a root device
 			if rootDeviceNames[name] {
 				continue
