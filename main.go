@@ -339,11 +339,13 @@ func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.addLog("Aborting flashing process...")
+
 	err := m.ddCmd.Process.Kill()
 	if err != nil {
 		m.addLog(fmt.Sprintf("Error aborting: %v", err))
 	} else {
-		m.addLog("Flashing aborted.")
+		m.addLog("Flashing aborted successfully.")
 	}
 
 	m.flashing = false

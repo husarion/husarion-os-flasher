@@ -1,3 +1,5 @@
 husarion-image-flasher
 husarion-os-flasher
 /docs
+*.img 
+*.img.xz

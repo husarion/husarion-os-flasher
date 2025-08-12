@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/creack/pty"
@@ -23,8 +24,14 @@ func getImageFiles(osImgPath string) ([]string, error) {
 
 	var images []string
 	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".img" {
-			images = append(images, filepath.Join(osImgPath, entry.Name()))
+		if !entry.IsDir() {
+			ext := filepath.Ext(entry.Name())
+			name := entry.Name()
+
+			// Support both .img and .img.xz files
+			if ext == ".img" || (ext == ".xz" && strings.HasSuffix(name, ".img.xz")) {
+				images = append(images, filepath.Join(osImgPath, name))
+			}
 		}
 	}
 
@@ -47,8 +54,75 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 			progressChan <- progressMsg("No partitions to unmount under " + dst)
 		}
 
-		// Start dd inside a pseudo-terminal so it flushes progress output in real time.
-		cmd := exec.Command("sh", "-c", fmt.Sprintf("pv %s | dd of=%s bs=1k", src, dst))
+		// Determine if we're dealing with a compressed image
+		isCompressed := strings.HasSuffix(src, ".img.xz")
+
+		var cmd *exec.Cmd
+		if isCompressed {
+			// For compressed .img.xz files, check if xz is available
+			_, err := exec.LookPath("xz")
+			if err != nil {
+				progressChan <- errorMsg{err: fmt.Errorf("cannot decompress .xz file: xz utility not found")}
+				return nil
+			}
+
+			progressChan <- progressMsg("Preparing to flash compressed image...")
+
+			// Get the uncompressed size using xz -l
+			sizeCmd := exec.Command("xz", "-l", src)
+			output, err := sizeCmd.Output()
+
+			var uncompressedSizeBytes int64
+			if err == nil {
+				// Parse the tabular output from xz -l
+				lines := strings.Split(string(output), "\n")
+				if len(lines) >= 2 { // Need at least header and data line
+					dataLine := lines[1] // Second line contains the data
+					fields := strings.Fields(dataLine)
+
+					// Find the uncompressed size (column 4) and unit (part of the same value or next field)
+					if len(fields) >= 5 {
+						sizeStr := fields[3] // Uncompressed size value
+						unitStr := fields[4] // Unit (GiB, MiB, etc.)
+
+						// Parse the size, removing commas if present
+						sizeValue, err := strconv.ParseFloat(strings.ReplaceAll(sizeStr, ",", ""), 64)
+						if err == nil && unitStr == "GiB" {
+							// Convert GiB to bytes
+							uncompressedSizeBytes = int64(sizeValue * 1024 * 1024 * 1024)
+						} else if err == nil && unitStr == "MiB" {
+							// Convert MiB to bytes
+							uncompressedSizeBytes = int64(sizeValue * 1024 * 1024)
+						}
+					}
+				}
+			}
+
+			// If we couldn't get the size from xz -l, estimate it from the compressed size
+			if uncompressedSizeBytes == 0 {
+				fileInfo, err := os.Stat(src)
+				if err == nil {
+					// Use a 5x multiplier as a reasonable estimate for disk images
+					uncompressedSizeBytes = fileInfo.Size() * 5
+					progressChan <- progressMsg("Using estimated uncompressed size for progress tracking")
+				}
+			}
+
+			if uncompressedSizeBytes > 0 {
+				// Use pv with size parameter for accurate progress reporting
+				progressChan <- progressMsg(fmt.Sprintf("Decompressing and flashing (size: %s)...",
+					formatBytes(uncompressedSizeBytes)))
+				cmd = exec.Command("sh", "-c", fmt.Sprintf("xz -dc %s | pv -s %d | dd of=%s bs=1k",
+					src, uncompressedSizeBytes, dst))
+			} else {
+				// Fallback if we couldn't determine the size
+				progressChan <- progressMsg("Decompressing and flashing (no size info)...")
+				cmd = exec.Command("sh", "-c", fmt.Sprintf("xz -dc %s | pv | dd of=%s bs=1k", src, dst))
+			}
+		} else {
+			// Standard uncompressed image
+			cmd = exec.Command("sh", "-c", fmt.Sprintf("pv %s | dd of=%s bs=1k", src, dst))
+		}
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			progressChan <- errorMsg{err: fmt.Errorf("failed to start dd command: %v", err)}
