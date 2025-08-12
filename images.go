@@ -112,16 +112,20 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 				// Use pv with size parameter for accurate progress reporting
 				progressChan <- progressMsg(fmt.Sprintf("Decompressing and flashing (size: %s)...",
 					formatBytes(uncompressedSizeBytes)))
-				cmd = exec.Command("sh", "-c", fmt.Sprintf("xz -dc %s | pv -s %d | dd of=%s bs=1k",
+
+				// Use bash explicitly instead of sh for pipefail support
+				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -s %d | dd of=%s bs=1k",
 					src, uncompressedSizeBytes, dst))
 			} else {
 				// Fallback if we couldn't determine the size
 				progressChan <- progressMsg("Decompressing and flashing (no size info)...")
-				cmd = exec.Command("sh", "-c", fmt.Sprintf("xz -dc %s | pv | dd of=%s bs=1k", src, dst))
+				// Use bash explicitly instead of sh for pipefail support
+				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv | dd of=%s bs=1k",
+					src, dst))
 			}
 		} else {
-			// Standard uncompressed image
-			cmd = exec.Command("sh", "-c", fmt.Sprintf("pv %s | dd of=%s bs=1k", src, dst))
+			// Standard uncompressed image - also switch to bash for consistency
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("pv %s | dd of=%s bs=1k", src, dst))
 		}
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
@@ -154,7 +158,17 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 			}
 
 			if err := cmd.Wait(); err != nil {
-				progressChan <- errorMsg{err: fmt.Errorf("dd command failed: %v", err)}
+				// Check if the error might be due to xz corruption
+				if isCompressed {
+					// Try to read any error output from xz
+					if xzErrorData, readErr := os.ReadFile("/tmp/xz_error"); readErr == nil && len(xzErrorData) > 0 {
+						progressChan <- errorMsg{err: fmt.Errorf("compressed file error: %s", string(xzErrorData))}
+					} else {
+						progressChan <- errorMsg{err: fmt.Errorf("decompression or dd command failed: %v", err)}
+					}
+				} else {
+					progressChan <- errorMsg{err: fmt.Errorf("dd command failed: %v", err)}
+				}
 			} else {
 				progressChan <- progressMsg("Syncing...")
 				if err := exec.Command("sync").Run(); err != nil {
@@ -169,3 +183,4 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 		return nil
 	}
 }
+
