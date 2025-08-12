@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,54 +25,95 @@ func getParentDevice(dev string) string {
 	return dev[:i+1]
 }
 
+// FindmntOutput represents the JSON structure of findmnt --json output
+type FindmntOutput struct {
+	Filesystems []struct {
+		Source string `json:"source"`
+	} `json:"filesystems"`
+}
+
+// LsblkOutput represents the JSON structure of lsblk --json output
+type LsblkOutput struct {
+	Blockdevices []struct {
+		Name        string   `json:"name"`
+		Mountpoints []string `json:"mountpoints"`
+		Children    []struct {
+			Name        string   `json:"name"`
+			Mountpoints []string `json:"mountpoints"`
+		} `json:"children,omitempty"`
+	} `json:"blockdevices"`
+}
+
 func getAvailableDevices() ([]string, error) {
 	var devices []string
+	rootDeviceNames := make(map[string]bool)
 
-	// Run lsblk without header.
-	cmd := exec.Command("lsblk", "-n", "-o", "NAME,MOUNTPOINTS")
+	// Use findmnt with JSON output to identify the root filesystem device
+	rootCmd := exec.Command("findmnt", "--json", "-o", "SOURCE", "/")
+	rootOutput, err := rootCmd.Output()
+	if err == nil {
+		var findmntData FindmntOutput
+		if err := json.Unmarshal(rootOutput, &findmntData); err == nil && len(findmntData.Filesystems) > 0 {
+			rootDevice := findmntData.Filesystems[0].Source
+			// Remove /dev/ prefix if present
+			rootDevice = strings.TrimPrefix(rootDevice, "/dev/")
+			// Mark both the partition and its parent device as root devices
+			rootDeviceNames[rootDevice] = true
+			rootDeviceNames[getParentDevice(rootDevice)] = true
+		}
+	}
+
+	// Use lsblk with JSON output to get detailed information about all block devices
+	cmd := exec.Command("lsblk", "--json", "-o", "NAME,MOUNTPOINTS")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
 
-	// Build a set of devices that host the root filesystem.
-	rootDevices := make(map[string]bool)
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	// Parse the JSON output
+	var lsblkData LsblkOutput
+	if err := json.Unmarshal(output, &lsblkData); err != nil {
+		return nil, err
+	}
+
+	// Process devices and find those containing root mountpoint
+	for _, device := range lsblkData.Blockdevices {
+		// Check if this device has the root mountpoint
+		for _, mount := range device.Mountpoints {
+			if mount == "/" {
+				rootDeviceNames[device.Name] = true
+				rootDeviceNames[getParentDevice(device.Name)] = true
+			}
 		}
-		fields := strings.Fields(line)
-		// Check if the mountpoint is exactly "/".
-		if len(fields) >= 2 && fields[1] == "/" {
-			// Remove any non-alphanumeric leading characters (e.g. "|-", "`-", etc.)
-			cleanName := strings.TrimLeftFunc(fields[0], func(r rune) bool {
-				return !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'))
-			})
-			dev := "/dev/" + cleanName
-			rootDevices[dev] = true
-			// Mark the underlying disk.
-			parent := "/dev/" + getParentDevice(cleanName)
-			rootDevices[parent] = true
+
+		// Also check children (partitions)
+		for _, child := range device.Children {
+			for _, mount := range child.Mountpoints {
+				if mount == "/" {
+					rootDeviceNames[child.Name] = true
+					rootDeviceNames[device.Name] = true // Parent device
+				}
+			}
 		}
 	}
 
-	// Iterate over /sys/block to list available disks.
+	// Iterate over /sys/block to list available disks
 	entries, err := os.ReadDir("/sys/block")
 	if err != nil {
 		return nil, err
 	}
+
 	for _, entry := range entries {
 		name := entry.Name()
 		devicePath := "/dev/" + name
 
 		// Skip loop and ram devices.
-		if !strings.HasPrefix(name, "loop") && !strings.HasPrefix(name, "ram") {
+		if !strings.HasPrefix(name, "loop") && !strings.HasPrefix(name, "ram") && !strings.HasPrefix(name, "sda") {
+			// Skip if this device is a root device or its partition is a root device
+			if rootDeviceNames[name] {
+				continue
+			}
 			if info, err := os.Stat(devicePath); err == nil && info.Mode()&os.ModeDevice != 0 {
-				if _, found := rootDevices[devicePath]; found {
-					continue
-				}
 				devices = append(devices, devicePath)
 			}
 		}
