@@ -69,6 +69,7 @@ type model struct {
 	ddCmd             *exec.Cmd     // dd command pointer for aborting
 	zones             *zone.Manager // Add zone manager to the model
 	osImgPath         string        // Store the image path for refreshes
+	flashStartTime    time.Time        // Add this field to track when flashing started
 }
 
 type progressMsg string
@@ -317,6 +318,7 @@ func (m *model) startFlashing() (tea.Model, tea.Cmd) {
 	// Create a new progress channel for this run
 	m.progressChan = make(chan tea.Msg)
 	m.flashing = true
+	m.flashStartTime = time.Now() // Record the start time
 	m.logs = nil
 	m.addLog(fmt.Sprintf("> Starting to flash %s to %s...", imagePath, devicePath))
 
@@ -430,23 +432,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flashing = false
 		m.aborting = false  // Reset aborting state
 		
+		// Calculate flashing duration
+		duration := time.Since(m.flashStartTime)
+		
 		// Create a success message with image and device details
 		var successMsg string
-		// No need to cast msg as it's already a doneMsg in this case
 		if msg.src != "" && msg.dst != "" {
-			// Format the success message with the source filename (not full path) and destination
+			// Format the success message with the source filename (not full path), destination, and duration
 			srcName := filepath.Base(msg.src)
-			successMsg = fmt.Sprintf("%s flashed successfully to %s", srcName, msg.dst)
+			successMsg = fmt.Sprintf("%s flashed successfully to %s in %s", 
+				srcName, 
+				msg.dst, 
+				formatDuration(duration))
 		} else {
 			// Fallback if source/destination info is missing
-			successMsg = "Flashing completed successfully!"
+			successMsg = fmt.Sprintf("Flashing completed successfully in %s!", formatDuration(duration))
 		}
 		
 		// Apply green styling to the success message
 		successMsg = lipgloss.NewStyle().
-            Foreground(lipgloss.Color("#00FF00")).
-            Bold(true).
-            Render(successMsg)
+			Foreground(lipgloss.Color("#00FF00")).
+			Bold(true).
+			Render(successMsg)
 		
 		m.addLog(successMsg)
 		m.ddCmd = nil
@@ -870,4 +877,26 @@ func main() {
 			log.Error("Could not stop server", "error", err)
 		}
 	}
+}
+
+// Helper function to format duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	// Round to seconds
+	seconds := int(d.Seconds())
+	
+	if seconds < 60 {
+		return fmt.Sprintf("%d seconds", seconds)
+	}
+	
+	minutes := seconds / 60
+	seconds = seconds % 60
+	
+	if minutes < 60 {
+		return fmt.Sprintf("%d minutes %d seconds", minutes, seconds)
+	}
+	
+	hours := minutes / 60
+	minutes = minutes % 60
+	
+	return fmt.Sprintf("%d hours %d minutes %d seconds", hours, minutes, seconds)
 }
