@@ -175,7 +175,8 @@ func writeImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 					progressChan <- errorMsg{err: fmt.Errorf("sync failed: %v", err)}
 				} else {
 					progressChan <- progressMsg("Sync completed successfully.")
-					progressChan <- doneMsg{}
+					// Include source and destination in the done message
+					progressChan <- doneMsg{src: src, dst: dst}
 				}
 			}
 		}()

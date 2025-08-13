@@ -35,6 +35,7 @@ const (
 	colorLilac      = "#718CFD"
 	colorAnthracite = "#2F303B"
 	colorLightRed   = "#ED3B42"
+	colorError      = "#FF3333" // Bright red for errors
 
 	// Minimal width for each selection window.
 	minListWidth = 50
@@ -56,6 +57,7 @@ type model struct {
 	viewport          viewport.Model
 	ready             bool
 	flashing          bool
+	aborting          bool     // New field to track aborting state
 	configuringEeprom bool
 	logs              []string
 	err               error
@@ -70,7 +72,10 @@ type model struct {
 }
 
 type progressMsg string
-type doneMsg struct{}
+type doneMsg struct{
+    src string
+    dst string
+}
 type errorMsg struct{ err error }
 type tickMsg time.Time
 
@@ -83,6 +88,9 @@ type ddStartedMsg struct {
 type eepromConfigMsg struct {
 	output []string
 }
+
+// Add a new message type for the delayed abort action
+type abortCompletedMsg struct{}
 
 func initialModel(osImgPath string, termWidth, termHeight int) model {
 	currentUser, _ := user.Current()
@@ -159,7 +167,7 @@ func initialModel(osImgPath string, termWidth, termHeight int) model {
 		imageList:    imageList,
 		logs:         make([]string, 0),
 		tick:         time.Now(),
-		activeList:   0,
+		activeList:   0,  // Starting with device list selected
 		progressChan: make(chan tea.Msg),
 		// dodane aby dzialal wish
 		width:     termWidth,
@@ -208,6 +216,7 @@ func (m *model) handleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.viewport, cmd = m.viewport.Update(keyMsg)
 			return m, cmd // Return the command!
 		}
+		// Flash button (index 3) doesn't need wheel events
 	} else if msg.Button == tea.MouseButtonWheelDown {
 		if m.activeList == 0 {
 			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
@@ -264,6 +273,15 @@ func listenProgress(ch chan tea.Msg) tea.Cmd {
 
 // Helper method for adding log entries with overflow protection
 func (m *model) addLog(msg string) {
+	// Check if this is an error message (starts with "Error:")
+	isError := strings.HasPrefix(msg, "Error:") || strings.Contains(msg, "error")
+	
+	// Apply red styling to error messages
+	if isError {
+		// Style with red text
+		msg = lipgloss.NewStyle().Foreground(lipgloss.Color(colorError)).Render(msg)
+	}
+
 	// Check if this is a progress message from pv
 	if strings.Contains(msg, "%") && strings.Contains(msg, "B/s") {
 		// If we already have logs and the last one was a progress message,
@@ -287,6 +305,8 @@ func (m *model) addLog(msg string) {
 
 // Helper method for starting the flashing process
 func (m *model) startFlashing() (tea.Model, tea.Cmd) {
+	// Remove the activeList check to allow flashing to be triggered by clicking the button
+	// regardless of which element is currently selected
 	if m.deviceList.SelectedItem() == nil || m.imageList.SelectedItem() == nil || m.flashing {
 		return m, nil
 	}
@@ -339,18 +359,28 @@ func (m *model) abortFlashing() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m.addLog("Aborting flashing process...")
+	// Set aborting state to true immediately
+	m.aborting = true
+	m.addLog("Aborting flashing process... (please wait)")
 
-	err := m.ddCmd.Process.Kill()
-	if err != nil {
-		m.addLog(fmt.Sprintf("Error aborting: %v", err))
-	} else {
-		m.addLog("Flashing aborted successfully.")
-	}
-
-	m.flashing = false
-	m.ddCmd = nil
-	return m, nil
+	// Return a sequence of commands:
+	// 1. Force UI refresh to show "Aborting..." text
+	// 2. Wait for 500ms to ensure UI renders the change
+	// 3. Actually kill the process
+	return m, tea.Sequence(
+		tea.Tick(10*time.Millisecond, func(time.Time) tea.Msg {
+			// Just a quick tick to force UI refresh
+			return nil
+		}),
+		tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+			// Now actually kill the process
+			err := m.ddCmd.Process.Kill()
+			if err != nil {
+				return errorMsg{err: fmt.Errorf("error aborting: %v", err)}
+			}
+			return abortCompletedMsg{}
+		}),
+	)
 }
 
 // ==============================================================
@@ -398,13 +428,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.flashing = false
-		m.addLog("Done!")
+		m.aborting = false  // Reset aborting state
+		
+		// Create a success message with image and device details
+		var successMsg string
+		// No need to cast msg as it's already a doneMsg in this case
+		if msg.src != "" && msg.dst != "" {
+			// Format the success message with the source filename (not full path) and destination
+			srcName := filepath.Base(msg.src)
+			successMsg = fmt.Sprintf("%s flashed successfully to %s", srcName, msg.dst)
+		} else {
+			// Fallback if source/destination info is missing
+			successMsg = "Flashing completed successfully!"
+		}
+		
+		// Apply green styling to the success message
+		successMsg = lipgloss.NewStyle().
+            Foreground(lipgloss.Color("#00FF00")).
+            Bold(true).
+            Render(successMsg)
+		
+		m.addLog(successMsg)
 		m.ddCmd = nil
 		return m, nil
 
 	case errorMsg:
 		m.flashing = false
+		m.aborting = false  // Reset aborting state
 		m.configuringEeprom = false
+		// Add "Error: " prefix to ensure it's caught by the styling logic
 		m.addLog(fmt.Sprintf("Error: %v", msg.err))
 		m.ddCmd = nil
 		return m, nil
@@ -428,10 +480,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, tea.Quit
 		case "tab":
-			m.activeList = (m.activeList + 1) % 3
+			// Cycle through device list, image list, viewport, and now flash button
+			m.activeList = (m.activeList + 1) % 4
 			return m, nil
 		case "enter":
-			return m.startFlashing()
+			// Only start flashing if the flash button is active
+			if m.activeList == 3 {
+				return m.startFlashing()
+			}
+			return m, nil
 		case "a", "A":
 			return m.abortFlashing()
 		case "ctrl+c", "q", "Q":
@@ -467,18 +524,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Handle flash button clicks
+		// Handle flash button clicks - consolidate the logic here
 		if m.zones.Get("flash-button").InBounds(msg) {
-			if !m.flashing {
+			// First set the flash button as the active element
+			m.activeList = 3
+			
+			// Then handle the action based on state
+			if !m.flashing && m.ready {
 				return m.startFlashing()
-			} else {
+			} else if m.flashing {
 				return m.abortFlashing()
 			}
+			return m, nil // Return after handling the flash button
 		}
 
+		// Handle other element clicks
 		if m.zones.Get("eeprom-button").InBounds(msg) {
 			return m.configEeprom()
 		}
+		
 		// Handle list selection
 		if m.zones.Get("device-view").InBounds(msg) {
 			m.activeList = 0
@@ -597,6 +661,11 @@ func (m model) View() string {
 		deviceView = m.zones.Mark("device-view", inactiveStyle.Render(deviceView))
 		imageView = m.zones.Mark("image-view", inactiveStyle.Render(imageView))
 		viewportView = m.zones.Mark("viewport-view", activeStyle.Render(viewportView))
+	} else if m.activeList == 3 {
+		// Flash button active - change button style
+		deviceView = m.zones.Mark("device-view", inactiveStyle.Render(deviceView))
+		imageView = m.zones.Mark("image-view", inactiveStyle.Render(imageView))
+		viewportView = m.zones.Mark("viewport-view", inactiveStyle.Render(viewportView))
 	}
 
 	var listView string
@@ -607,58 +676,81 @@ func (m model) View() string {
 	}
 	listView = containerStyle.Render(listView)
 
-	// Flash button.
+	// Flash button - update to show selection state
 	var buttonStyle lipgloss.Style
 	var buttonText string
 
+	// Determine button text based on state
 	if m.flashing {
-		buttonStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(1, 1).
-			Margin(1, 1).
-			Foreground(lipgloss.Color(colorWhite)).
-			Background(lipgloss.Color(colorAnthracite))
-		buttonText = "   Abort   "
+		if m.aborting {
+			buttonText = "Aborting..."
+		} else {
+			buttonText = "   Abort   "
+		}
 	} else {
-		buttonStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(1, 1).
-			Margin(1, 1).
-			Foreground(lipgloss.Color(colorWhite)).
-			Background(lipgloss.Color(colorPantone))
 		buttonText = "Flash Image"
-
+	}
+	
+	// Base styles always include these properties
+	buttonStyle = lipgloss.NewStyle().
+		Bold(true).
+		Padding(1, 1).
+		Margin(1, 1).
+		Foreground(lipgloss.Color(colorWhite))
+	
+	// Apply background color based on state and selection
+	if m.flashing {
+		// During flashing/aborting, always use dark background
+		buttonStyle = buttonStyle.Background(lipgloss.Color(colorAnthracite))
+	} else if m.activeList == 3 {
+		// Selected and ready to flash: use red (Pantone)
+		buttonStyle = buttonStyle.Background(lipgloss.Color(colorPantone))
+	} else {
+		// Not selected: use gray (Anthracite)
+		buttonStyle = buttonStyle.Background(lipgloss.Color(colorAnthracite))
+		
+		// If not ready (missing device or image), keep it gray
 		if !m.ready {
 			buttonStyle = buttonStyle.Background(lipgloss.Color(colorAnthracite))
+		} else {
+			// Not selected but ready: use a lighter shade of gray
+			buttonStyle = buttonStyle.Background(lipgloss.Color("#505050"))
 		}
 	}
 
 	button := m.zones.Mark("flash-button", buttonStyle.Render(buttonText))
 
-	// button that is visible only if "grep -q "Raspberry Pi" /proc/cpuinfo" returns true
+	// Initialize buttonView variable
 	var buttonView string
 
+	// EEPROM button styling - similar approach
 	if isRaspberryPi() {
-		buttonStyle = lipgloss.NewStyle().
+		// Base style for EEPROM button
+		eepromStyle := lipgloss.NewStyle().
 			Bold(true).
 			Padding(1, 1).
 			Margin(1, 1).
-			Foreground(lipgloss.Color(colorWhite)).
-			Background(lipgloss.Color(colorLilac))
+			Foreground(lipgloss.Color(colorWhite))
+		
+		// Use lilac color if selected, otherwise gray
+		if m.activeList == 4 { // Assuming 4 would be the EEPROM button index
+			eepromStyle = eepromStyle.Background(lipgloss.Color(colorLilac))
+		} else {
+			eepromStyle = eepromStyle.Background(lipgloss.Color(colorAnthracite))
+		}
 
-		buttonEeprom := m.zones.Mark("eeprom-button", buttonStyle.Render("Config EEPROM"))
-
+		buttonEeprom := m.zones.Mark("eeprom-button", eepromStyle.Render("Config EEPROM"))
 		buttonView = lipgloss.JoinHorizontal(lipgloss.Center, button, buttonEeprom)
 	} else {
 		buttonView = button
 	}
 
-	// Footer.
+	// Footer - update to include flash button selection info
 	footerStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(colorWhite)).
 		Align(lipgloss.Center).
 		MarginTop(1)
-	footer := footerStyle.Render("TAB to switch • ↑↓ to navigate • ENTER to flash • A to abort • ESC to power-off • Q to quit.")
+	footer := footerStyle.Render("TAB to switch • ↑↓ to navigate • ENTER to flash when button selected • A to abort • ESC to power-off • Q to quit.")
 
 	ui := lipgloss.JoinVertical(lipgloss.Center,
 		header,
