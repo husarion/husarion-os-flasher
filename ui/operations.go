@@ -1,14 +1,18 @@
 package ui
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/creack/pty"
 	"github.com/husarion/husarion-os-flasher/util"
 )
 
@@ -122,6 +126,125 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// ExtractWithProgress performs extraction with progress reporting using pv
+func ExtractWithProgress(compressedPath, outputPath string, progressChan chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		// Get compressed file size for initial info
+		fileInfo, err := os.Stat(compressedPath)
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to get file info: %v", err)}
+		}
+		compressedSize := fileInfo.Size()
+
+		// Get uncompressed size using xz -l for accurate progress
+		sizeCmd := exec.Command("xz", "-l", compressedPath)
+		sizeOutput, err := sizeCmd.Output()
+		
+		var uncompressedSize int64
+		if err == nil {
+			// Parse xz -l output to get uncompressed size
+			lines := strings.Split(string(sizeOutput), "\n")
+			for _, line := range lines {
+				// Look for the data line (contains the filename)
+				if strings.Contains(line, filepath.Base(compressedPath)) {
+					fields := strings.Fields(line)
+					if len(fields) >= 5 {
+						// Parse the uncompressed size field (e.g., "14.3" + "GiB")
+						sizeStr := strings.ReplaceAll(fields[4], ",", "") // Remove commas
+						unitStr := fields[5] // Unit
+						
+						if sizeValue, parseErr := strconv.ParseFloat(sizeStr, 64); parseErr == nil {
+							if unitStr == "GiB" {
+								uncompressedSize = int64(sizeValue * 1024 * 1024 * 1024)
+							} else if unitStr == "MiB" {
+								uncompressedSize = int64(sizeValue * 1024 * 1024)
+							} else if unitStr == "KiB" {
+								uncompressedSize = int64(sizeValue * 1024)
+							} else if unitStr == "B" {
+								uncompressedSize = int64(sizeValue)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// Fallback: estimate uncompressed size as 3-5x compressed size
+		if uncompressedSize == 0 {
+			uncompressedSize = compressedSize * 4
+			progressChan <- ProgressMsg("Using estimated uncompressed size for progress")
+		}
+
+		// Show initial size information
+		progressChan <- ProgressMsg(fmt.Sprintf("Compressed: %s → Estimated uncompressed: %s", 
+			util.FormatBytes(compressedSize), util.FormatBytes(uncompressedSize)))
+
+		// Use the same pattern as flashing: xz to decompress and pv to show progress
+		var cmd *exec.Cmd
+		if uncompressedSize > 0 {
+			// Use pv with size parameter for accurate progress reporting (like flashing does)
+			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s)...", util.FormatBytes(uncompressedSize)))
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -s %d > '%s'", 
+				compressedPath, uncompressedSize, outputPath))
+		} else {
+			// Fallback if we couldn't determine the size
+			progressChan <- ProgressMsg("Extracting (no size info)...")
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv > '%s'", 
+				compressedPath, outputPath))
+		}
+
+		// Use pty.Start like flashing does to capture the progress bar
+		ptmx, err := pty.Start(cmd)
+		if err != nil {
+			return ErrorMsg{Err: fmt.Errorf("failed to start extraction command: %v", err)}
+		}
+
+		// Send ExtractStartedMsg so the model stores the command pointer for aborting
+		progressChan <- ExtractStartedMsg{Cmd: cmd}
+
+		// Use the same scanning pattern as flashing
+		go func() {
+			scanner := bufio.NewScanner(ptmx)
+			// Custom split function: split on carriage return OR newline (same as flashing)
+			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+				if i := bytes.IndexAny(data, "\r\n"); i >= 0 {
+					return i + 1, data[:i], nil
+				}
+				if atEOF && len(data) > 0 {
+					return len(data), data, nil
+				}
+				return 0, nil, nil
+			})
+
+			for scanner.Scan() {
+				line := scanner.Text()
+				trimmed := strings.TrimSpace(line)
+				if len(trimmed) > 0 {
+					progressChan <- ProgressMsg(trimmed)
+				}
+			}
+
+			if err := cmd.Wait(); err != nil {
+				progressChan <- ErrorMsg{Err: fmt.Errorf("extraction failed: %v", err)}
+			} else {
+				// Get the actual final extracted file size
+				if finalInfo, err := os.Stat(outputPath); err == nil {
+					finalSize := finalInfo.Size()
+					progressChan <- ProgressMsg(fmt.Sprintf("Extraction complete. Final size: %s", util.FormatBytes(finalSize)))
+				}
+				
+				progressChan <- ExtractCompletedMsg{
+					Src: compressedPath,
+					Dst: outputPath,
+				}
+			}
+		}()
+
+		return nil
+	}
+}
+
 // UncompressImage extracts a .img.xz file
 func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 	if !m.IsCompressedImageSelected() || m.Extracting {
@@ -147,6 +270,11 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 	m.Extracting = true
 	m.AddLog(fmt.Sprintf("> Uncompressing %s to %s...", filepath.Base(compressedPath), filepath.Base(outputPath)))
 
+	// Ensure progress channel exists for this operation
+	if m.ProgressChan == nil {
+		m.ProgressChan = make(chan tea.Msg)
+	}
+
 	// Set focus to the Abort button based on system type
 	if util.IsRaspberryPi() {
 		m.ActiveList = 6 // Abort button index on Pi
@@ -154,40 +282,9 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 		m.ActiveList = 5 // Abort button index on non-Pi
 	}
 
-	// Immediately return a dummy command to update the UI
-	return m, tea.Sequence(
-		func() tea.Msg {
-			// This first message just ensures the UI updates right away
-			return ProgressMsg("Starting extraction...")
-		},
-		func() tea.Msg {
-			// Run the extraction in a goroutine
-			go func() {
-				// Create command without -k flag to force overwrite
-				cmd := exec.Command("xz", "-d", "-f", compressedPath)
-				
-				// Store command reference for aborting
-				m.ExtractCmd = cmd
-				
-				// Start the command and capture output
-				output, err := cmd.CombinedOutput()
-				
-				if err != nil {
-					// If there's an error, send it to the progress channel
-					m.ProgressChan <- ErrorMsg{Err: fmt.Errorf("failed to uncompress: %v\n%s", err, output)}
-				} else {
-					// If successful, send completion message
-					m.ProgressChan <- ExtractCompletedMsg{
-						Src: compressedPath,
-						Dst: outputPath,
-					}
-				}
-			}()
-			
-			// Return nil to chain to the next command
-			return nil
-		},
-		// Listen for progress messages
+	// Start the extraction with progress reporting
+	return m, tea.Batch(
+		ExtractWithProgress(compressedPath, outputPath, m.ProgressChan),
 		ListenProgress(m.ProgressChan),
 	)
 }

@@ -38,24 +38,33 @@ func FormatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// FormatDuration formats a duration in a human-readable way
+// FormatDuration formats a duration in a human-readable way using short format
 func FormatDuration(d time.Duration) string {
 	// Round to seconds
 	seconds := int(d.Seconds())
 	
 	if seconds < 60 {
-		return fmt.Sprintf("%d seconds", seconds)
+		return fmt.Sprintf("%ds", seconds)
 	}
 	
 	minutes := seconds / 60
 	seconds = seconds % 60
 	
 	if minutes < 60 {
-		return fmt.Sprintf("%d minutes %d seconds", minutes, seconds)
+		if seconds == 0 {
+			return fmt.Sprintf("%dm", minutes)
+		}
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
 	}
 	
 	hours := minutes / 60
 	minutes = minutes % 60
 	
-	return fmt.Sprintf("%d hours %d minutes %d seconds", hours, minutes, seconds)
+	if minutes == 0 && seconds == 0 {
+		return fmt.Sprintf("%dh", hours)
+	} else if seconds == 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	
+	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
 }

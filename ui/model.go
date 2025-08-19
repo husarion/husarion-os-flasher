@@ -53,13 +53,13 @@ func (i Item) Description() string { return i.desc }
 // FilterValue implements the list.Item interface
 func (i Item) FilterValue() string { return i.title }
 
-// IsCompressedImageSelected checks if the selected image is a compressed .img.xz file
-func (m *Model) IsCompressedImageSelected() bool {
+// IsCompressedImageSelected checks if the selected image is a .img.xz file
+func (m Model) IsCompressedImageSelected() bool {
 	if m.ImageList.SelectedItem() == nil {
 		return false
 	}
-	selectedImage := m.ImageList.SelectedItem().(Item).value
-	return strings.HasSuffix(selectedImage, ".img.xz")
+	imagePath := m.ImageList.SelectedItem().(Item).value
+	return strings.HasSuffix(imagePath, ".img.xz")
 }
 
 // AddLog adds a log entry with overflow protection

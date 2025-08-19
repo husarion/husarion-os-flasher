@@ -193,6 +193,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening for progress messages.
 		return m, ListenProgress(m.ProgressChan)
 
+	case ExtractStartedMsg:
+		m.ExtractCmd = msg.Cmd
+		// Continue listening for progress messages.
+		return m, ListenProgress(m.ProgressChan)
+
 	case ExtractCompletedMsg:
 		m.Extracting = false
 		
