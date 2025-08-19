@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,8 @@ type Model struct {
 	ProgressChan      chan tea.Msg  // For streaming dd logs
 	DdCmd             *exec.Cmd     // dd command pointer for aborting
 	ExtractCmd        *exec.Cmd     // extraction command pointer for aborting
+	DdPty             *os.File      // pty for dd command (for proper cleanup)
+	ExtractPty        *os.File      // pty for extraction command (for proper cleanup)
 	Zones             *zone.Manager // Add zone manager to the model
 	OsImgPath         string        // Store the image path for refreshes
 	FlashStartTime    time.Time     // Track when flashing started

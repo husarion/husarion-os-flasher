@@ -25,8 +25,8 @@ func (m *Model) StartFlashing() (tea.Model, tea.Cmd) {
 	imagePath := m.ImageList.SelectedItem().(Item).value
 	devicePath := m.DeviceList.SelectedItem().(Item).value
 
-	// Create a new progress channel for this run
-	m.ProgressChan = make(chan tea.Msg)
+	// Create a new buffered progress channel for this run
+	m.ProgressChan = make(chan tea.Msg, 100)
 	m.Flashing = true
 	m.FlashStartTime = time.Now() // Record the start time
 	m.Logs = nil
@@ -98,6 +98,11 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 				if err != nil {
 					return ErrorMsg{Err: fmt.Errorf("error aborting flash: %v", err)}
 				}
+				// Close the pty to ensure proper cleanup
+				if m.DdPty != nil {
+					m.DdPty.Close()
+				}
+				// Don't close the progress channel here - let the goroutine handle it
 				return AbortCompletedMsg{}
 			}),
 		)
@@ -113,10 +118,16 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 				return nil 
 			}),
 			tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+				// Kill the process
 				err := m.ExtractCmd.Process.Kill()
 				if err != nil {
 					return ErrorMsg{Err: fmt.Errorf("error aborting extraction: %v", err)}
 				}
+				// Close the pty to ensure proper cleanup
+				if m.ExtractPty != nil {
+					m.ExtractPty.Close()
+				}
+				// Don't close the progress channel here - let the goroutine handle it
 				return AbortCompletedMsg{}
 			}),
 		)
@@ -129,6 +140,9 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 // ExtractWithProgress performs extraction with progress reporting using pv
 func ExtractWithProgress(compressedPath, outputPath string, progressChan chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
+		// DEBUG: Signal that we're starting the extraction
+		progressChan <- ProgressMsg("DEBUG: ExtractWithProgress started")
+		
 		// Get compressed file size for initial info
 		fileInfo, err := os.Stat(compressedPath)
 		if err != nil {
@@ -181,30 +195,35 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 			util.FormatBytes(compressedSize), util.FormatBytes(uncompressedSize)))
 
 		// Use the same pattern as flashing: xz to decompress and pv to show progress
+		// Key fix: use dd to write the file so pv's stderr progress goes to pty, not lost to redirection
 		var cmd *exec.Cmd
 		if uncompressedSize > 0 {
 			// Use pv with size parameter for accurate progress reporting (like flashing does)
 			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s)...", util.FormatBytes(uncompressedSize)))
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -s %d > '%s'", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -s %d | dd of='%s' bs=1k", 
 				compressedPath, uncompressedSize, outputPath))
 		} else {
 			// Fallback if we couldn't determine the size
 			progressChan <- ProgressMsg("Extracting (no size info)...")
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv > '%s'", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv | dd of='%s' bs=1k", 
 				compressedPath, outputPath))
 		}
 
 		// Use pty.Start like flashing does to capture the progress bar
+		progressChan <- ProgressMsg("DEBUG: About to start pty command")
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			return ErrorMsg{Err: fmt.Errorf("failed to start extraction command: %v", err)}
 		}
 
 		// Send ExtractStartedMsg so the model stores the command pointer for aborting
-		progressChan <- ExtractStartedMsg{Cmd: cmd}
+		progressChan <- ExtractStartedMsg{Cmd: cmd, Pty: ptmx}
+		progressChan <- ProgressMsg("DEBUG: ExtractStartedMsg sent")
 
 		// Use the same scanning pattern as flashing
 		go func() {
+			defer ptmx.Close() // Ensure pty is closed when goroutine exits
+			
 			scanner := bufio.NewScanner(ptmx)
 			// Custom split function: split on carriage return OR newline (same as flashing)
 			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -221,22 +240,42 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 				line := scanner.Text()
 				trimmed := strings.TrimSpace(line)
 				if len(trimmed) > 0 {
-					progressChan <- ProgressMsg(trimmed)
+					// Safe send to progress channel
+					select {
+					case progressChan <- ProgressMsg(trimmed):
+					default:
+						// Channel might be closed, exit gracefully
+						return
+					}
 				}
 			}
 
 			if err := cmd.Wait(); err != nil {
-				progressChan <- ErrorMsg{Err: fmt.Errorf("extraction failed: %v", err)}
+				// Safe send to progress channel
+				select {
+				case progressChan <- ErrorMsg{Err: fmt.Errorf("extraction failed: %v", err)}:
+				default:
+					// Channel might be closed, exit gracefully
+					return
+				}
 			} else {
 				// Get the actual final extracted file size
 				if finalInfo, err := os.Stat(outputPath); err == nil {
 					finalSize := finalInfo.Size()
-					progressChan <- ProgressMsg(fmt.Sprintf("Extraction complete. Final size: %s", util.FormatBytes(finalSize)))
+					select {
+					case progressChan <- ProgressMsg(fmt.Sprintf("Extraction complete. Final size: %s", util.FormatBytes(finalSize))):
+					default:
+						return
+					}
 				}
 				
-				progressChan <- ExtractCompletedMsg{
+				select {
+				case progressChan <- ExtractCompletedMsg{
 					Src: compressedPath,
 					Dst: outputPath,
+				}:
+				default:
+					return
 				}
 			}
 		}()
@@ -269,11 +308,15 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 	// Set extraction state immediately
 	m.Extracting = true
 	m.AddLog(fmt.Sprintf("> Uncompressing %s to %s...", filepath.Base(compressedPath), filepath.Base(outputPath)))
+	m.AddLog("> DEBUG: Starting extraction with new progress channel")
 
-	// Ensure progress channel exists for this operation
-	if m.ProgressChan == nil {
-		m.ProgressChan = make(chan tea.Msg)
-	}
+	// Force cleanup of any previous state
+	m.ExtractCmd = nil
+	m.ExtractPty = nil
+	m.Aborting = false  // Clear aborting state
+	
+	// Create a new buffered progress channel for this operation (like flashing does)
+	m.ProgressChan = make(chan tea.Msg, 100)
 
 	// Set focus to the Abort button based on system type
 	if util.IsRaspberryPi() {

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"os/exec"
 	"time"
 
@@ -27,6 +28,7 @@ type (
 	// DDStartedMsg carries the dd command pointer for aborting
 	DDStartedMsg struct {
 		Cmd *exec.Cmd
+		Pty *os.File
 	}
 	
 	// EEPROMConfigMsg is sent with EEPROM configuration results
@@ -46,6 +48,7 @@ type (
 	// ExtractStartedMsg is sent when extraction starts
 	ExtractStartedMsg struct {
 		Cmd *exec.Cmd
+		Pty *os.File
 	}
 )
 

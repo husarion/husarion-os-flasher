@@ -135,9 +135,11 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 		}
 
 		// Send DDStartedMsg so the model stores the dd command pointer for aborting.
-		progressChan <- DDStartedMsg{Cmd: cmd}
+		progressChan <- DDStartedMsg{Cmd: cmd, Pty: ptmx}
 
 		go func() {
+			defer ptmx.Close() // Ensure pty is closed when goroutine exits
+			
 			scanner := bufio.NewScanner(ptmx)
 			// Custom split function: split on carriage return OR newline.
 			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
@@ -154,30 +156,62 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 				line := scanner.Text()
 				trimmed := strings.TrimSpace(line)
 				if len(trimmed) > 0 {
-					progressChan <- ProgressMsg(trimmed)
+					// Safe send to progress channel
+					select {
+					case progressChan <- ProgressMsg(trimmed):
+					default:
+						// Channel might be closed, exit gracefully
+						return
+					}
 				}
 			}
 
 			if err := cmd.Wait(); err != nil {
 				// Check if the error might be due to xz corruption
+				var errMsg error
 				if isCompressed {
 					// Try to read any error output from xz
 					if xzErrorData, readErr := os.ReadFile("/tmp/xz_error"); readErr == nil && len(xzErrorData) > 0 {
-						progressChan <- ErrorMsg{Err: fmt.Errorf("compressed file error: %s", string(xzErrorData))}
+						errMsg = fmt.Errorf("compressed file error: %s", string(xzErrorData))
 					} else {
-						progressChan <- ErrorMsg{Err: fmt.Errorf("decompression or dd command failed: %v", err)}
+						errMsg = fmt.Errorf("decompression or dd command failed: %v", err)
 					}
 				} else {
-					progressChan <- ErrorMsg{Err: fmt.Errorf("dd command failed: %v", err)}
+					errMsg = fmt.Errorf("dd command failed: %v", err)
+				}
+				
+				// Safe send to progress channel
+				select {
+				case progressChan <- ErrorMsg{Err: errMsg}:
+				default:
+					return
 				}
 			} else {
-				progressChan <- ProgressMsg("Syncing...")
+				select {
+				case progressChan <- ProgressMsg("Syncing..."):
+				default:
+					return
+				}
+				
 				if err := exec.Command("sync").Run(); err != nil {
-					progressChan <- ErrorMsg{Err: fmt.Errorf("sync failed: %v", err)}
+					select {
+					case progressChan <- ErrorMsg{Err: fmt.Errorf("sync failed: %v", err)}:
+					default:
+						return
+					}
 				} else {
-					progressChan <- ProgressMsg("Sync completed successfully.")
+					select {
+					case progressChan <- ProgressMsg("Sync completed successfully."):
+					default:
+						return
+					}
+					
 					// Include source and destination in the done message
-					progressChan <- DoneMsg{Src: src, Dst: dst}
+					select {
+					case progressChan <- DoneMsg{Src: src, Dst: dst}:
+					default:
+						return
+					}
 				}
 			}
 		}()

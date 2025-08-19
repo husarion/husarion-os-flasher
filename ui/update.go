@@ -174,6 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		
 		m.AddLog(successMsg)
 		m.DdCmd = nil
+		m.DdPty = nil  // Clear pty reference after completion
 		return m, nil
 
 	case ErrorMsg:
@@ -186,20 +187,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.AddLog(fmt.Sprintf("Error: %v", msg.Err))
 		m.DdCmd = nil
 		m.ExtractCmd = nil
+		// Clear pty references on error
+		m.DdPty = nil
+		m.ExtractPty = nil
 		return m, nil
 
 	case DDStartedMsg:
 		m.DdCmd = msg.Cmd
+		m.DdPty = msg.Pty
 		// Continue listening for progress messages.
 		return m, ListenProgress(m.ProgressChan)
 
 	case ExtractStartedMsg:
 		m.ExtractCmd = msg.Cmd
+		m.ExtractPty = msg.Pty
 		// Continue listening for progress messages.
 		return m, ListenProgress(m.ProgressChan)
 
 	case ExtractCompletedMsg:
 		m.Extracting = false
+		m.ExtractCmd = nil  // Clear command reference after completion
+		m.ExtractPty = nil  // Clear pty reference after completion
 		
 		// Create a success message with source and destination
 		successMsg := fmt.Sprintf("%s successfully extracted to %s", 
@@ -236,6 +244,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Flashing = false
 		m.Extracting = false
 		m.Aborting = false
+		// Clear command references after abort
+		m.DdCmd = nil
+		m.ExtractCmd = nil
+		// Clear pty references after abort
+		m.DdPty = nil
+		m.ExtractPty = nil
 		m.AddLog(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFCC00")).
 			Bold(true).
