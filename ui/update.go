@@ -201,8 +201,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ExtractStartedMsg:
 		m.ExtractCmd = msg.Cmd
 		m.ExtractPty = msg.Pty
-		// Continue listening for progress messages.
-		return m, ListenProgress(m.ProgressChan)
+		// Continue listening for progress messages and also send an immediate progress message
+		m.AddLog("Extraction started - monitoring progress...")
+		return m, tea.Batch(
+			ListenProgress(m.ProgressChan),
+			func() tea.Msg {
+				return ProgressMsg("Initializing extraction...")
+			},
+		)
 
 	case ExtractCompletedMsg:
 		m.Extracting = false

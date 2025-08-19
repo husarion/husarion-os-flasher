@@ -140,8 +140,8 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 // ExtractWithProgress performs extraction with progress reporting using pv
 func ExtractWithProgress(compressedPath, outputPath string, progressChan chan tea.Msg) tea.Cmd {
 	return func() tea.Msg {
-		// DEBUG: Signal that we're starting the extraction
-		progressChan <- ProgressMsg("DEBUG: ExtractWithProgress started")
+		// Send an initial message to ensure the progress listener is active
+		progressChan <- ProgressMsg("Preparing extraction...")
 		
 		// Get compressed file size for initial info
 		fileInfo, err := os.Stat(compressedPath)
@@ -200,17 +200,16 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 		if uncompressedSize > 0 {
 			// Use pv with size parameter for accurate progress reporting (like flashing does)
 			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s)...", util.FormatBytes(uncompressedSize)))
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -s %d | dd of='%s' bs=1k", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f -s %d | dd of='%s' bs=1k", 
 				compressedPath, uncompressedSize, outputPath))
 		} else {
 			// Fallback if we couldn't determine the size
 			progressChan <- ProgressMsg("Extracting (no size info)...")
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv | dd of='%s' bs=1k", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f | dd of='%s' bs=1k", 
 				compressedPath, outputPath))
 		}
 
 		// Use pty.Start like flashing does to capture the progress bar
-		progressChan <- ProgressMsg("DEBUG: About to start pty command")
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			return ErrorMsg{Err: fmt.Errorf("failed to start extraction command: %v", err)}
@@ -218,7 +217,6 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 
 		// Send ExtractStartedMsg so the model stores the command pointer for aborting
 		progressChan <- ExtractStartedMsg{Cmd: cmd, Pty: ptmx}
-		progressChan <- ProgressMsg("DEBUG: ExtractStartedMsg sent")
 
 		// Use the same scanning pattern as flashing
 		go func() {
@@ -308,7 +306,6 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 	// Set extraction state immediately
 	m.Extracting = true
 	m.AddLog(fmt.Sprintf("> Uncompressing %s to %s...", filepath.Base(compressedPath), filepath.Base(outputPath)))
-	m.AddLog("> DEBUG: Starting extraction with new progress channel")
 
 	// Force cleanup of any previous state
 	m.ExtractCmd = nil
@@ -327,6 +324,11 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 
 	// Start the extraction with progress reporting
 	return m, tea.Batch(
+		func() tea.Msg {
+			// Send an immediate message to kickstart the progress listener
+			m.ProgressChan <- ProgressMsg("Starting extraction...")
+			return nil
+		},
 		ExtractWithProgress(compressedPath, outputPath, m.ProgressChan),
 		ListenProgress(m.ProgressChan),
 	)
