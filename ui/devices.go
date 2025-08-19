@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"encoding/json"
@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// getParentDevice returns the base disk name for a partition.
+// GetParentDevice returns the base disk name for a partition.
 // For example, "nvme0n1p2" becomes "nvme0n1", and "sda1" becomes "sda".
-func getParentDevice(dev string) string {
+func GetParentDevice(dev string) string {
 	if strings.HasPrefix(dev, "nvme") {
 		if idx := strings.LastIndex(dev, "p"); idx != -1 {
 			return dev[:idx]
@@ -44,7 +44,7 @@ type LsblkOutput struct {
 	} `json:"blockdevices"`
 }
 
-func getAvailableDevices() ([]string, error) {
+func GetAvailableDevices() ([]string, error) {
 	var devices []string
 	rootDeviceNames := make(map[string]bool)
 
@@ -59,7 +59,7 @@ func getAvailableDevices() ([]string, error) {
 			rootDevice = strings.TrimPrefix(rootDevice, "/dev/")
 			// Mark both the partition and its parent device as root devices
 			rootDeviceNames[rootDevice] = true
-			rootDeviceNames[getParentDevice(rootDevice)] = true
+			rootDeviceNames[GetParentDevice(rootDevice)] = true
 		}
 	}
 
@@ -82,7 +82,7 @@ func getAvailableDevices() ([]string, error) {
 		for _, mount := range device.Mountpoints {
 			if mount == "/" {
 				rootDeviceNames[device.Name] = true
-				rootDeviceNames[getParentDevice(device.Name)] = true
+				rootDeviceNames[GetParentDevice(device.Name)] = true
 			}
 		}
 
