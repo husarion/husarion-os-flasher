@@ -215,10 +215,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ExtractCmd = nil  // Clear command reference after completion
 		m.ExtractPty = nil  // Clear pty reference after completion
 		
-		// Create a success message with source and destination
-		successMsg := fmt.Sprintf("%s successfully extracted to %s", 
+		// Calculate extraction duration
+		duration := time.Since(m.ExtractStartTime)
+		
+		// Create a success message with source, destination, and duration
+		successMsg := fmt.Sprintf("%s successfully extracted to %s in %s", 
 			filepath.Base(msg.Src), 
-			filepath.Base(msg.Dst))
+			filepath.Base(msg.Dst),
+			util.FormatDuration(duration))
 		successMsg = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#00FF00")).
 			Bold(true).
@@ -378,19 +382,25 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	// Handle enter key based on which element is selected
 	if m.ActiveList == 3 {
-		// Flash button
-		return m.StartFlashing()
+		// Flash button - only allow if not already in an operation and ready
+		if !m.Flashing && !m.Extracting && m.Ready {
+			return m.StartFlashing()
+		}
 	} else if m.ActiveList == 4 {
 		// This could be either EEPROM config or Abort button
 		if m.Flashing || m.Extracting {
 			// If we're in an operation, this is the Abort button
 			return m.AbortOperation()
 		} else if util.IsRaspberryPi() {
-			// Otherwise on Pi, this is the EEPROM button
-			return m.ConfigEEPROM()
+			// Otherwise on Pi, this is the EEPROM button - only allow if not in operation
+			if !m.ConfiguringEeprom {
+				return m.ConfigEEPROM()
+			}
 		} else if m.IsCompressedImageSelected() {
-			// On non-Pi systems, this is the Extract Button
-			return m.UncompressImage()
+			// On non-Pi systems, this is the Extract Button - only allow if not in operation
+			if !m.Flashing && !m.Extracting {
+				return m.UncompressImage()
+			}
 		}
 	} else if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing && !m.Extracting) {
 		// Extract button on Pi (only when not in an operation)
@@ -442,12 +452,21 @@ func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.ActiveList = 4
 		}
-		return m.UncompressImage()
+		
+		// Only allow extraction if not already in an operation
+		if !m.Flashing && !m.Extracting {
+			return m.UncompressImage()
+		}
+		return m, nil // Return after handling the uncompress button
 	}
 
 	// Handle other element clicks
 	if m.Zones.Get("eeprom-button").InBounds(msg) {
-		return m.ConfigEEPROM()
+		// Only allow EEPROM configuration if not already in an operation
+		if !m.Flashing && !m.Extracting && !m.ConfiguringEeprom {
+			return m.ConfigEEPROM()
+		}
+		return m, nil
 	}
 	
 	// Handle list selection

@@ -13,6 +13,7 @@ const (
 	ColorAnthracite = "#2F303B"
 	ColorLightRed   = "#ED3B42"
 	ColorError      = "#FF3333" // Bright red for errors
+	ColorDisabled   = "#1A1B22" // Darker color for disabled buttons
 
 	// Minimal width for each selection window.
 	MinListWidth = 50

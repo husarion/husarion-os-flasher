@@ -38,6 +38,7 @@ type Model struct {
 	Zones             *zone.Manager // Add zone manager to the model
 	OsImgPath         string        // Store the image path for refreshes
 	FlashStartTime    time.Time     // Track when flashing started
+	ExtractStartTime  time.Time     // Track when extraction started
 }
 
 // Item represents an entry in a list (device or image)

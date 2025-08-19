@@ -170,7 +170,7 @@ func (m Model) renderButtons(styles struct {
 	
 	// Apply background color based on state and selection
 	if m.Flashing || m.Extracting {
-		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorAnthracite))
+		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorDisabled))
 	} else if m.ActiveList == 3 {
 		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorPantone))
 	} else {
@@ -210,7 +210,7 @@ func (m Model) renderButtons(styles struct {
 		var abortText string
 		if m.Aborting {
 			abortText = "Aborting..."
-			abortStyle = abortStyle.Background(lipgloss.Color(ColorAnthracite))
+			abortStyle = abortStyle.Background(lipgloss.Color(ColorDisabled))
 		} else {
 			abortText = "   Abort   "
 			if m.ActiveList == abortIndex {
@@ -228,11 +228,13 @@ func (m Model) renderButtons(styles struct {
 		var uncompressText string
 		if m.Extracting {
 			uncompressText = "Extracting..."
-			uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorAnthracite))
+			uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorDisabled))
 		} else {
 			uncompressText = "Extract Image"
 			if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing) || (!util.IsRaspberryPi() && m.ActiveList == 4 && !m.Flashing) {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorLilac))
+			} else if m.Flashing {
+				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorAnthracite))
 			}
@@ -243,11 +245,13 @@ func (m Model) renderButtons(styles struct {
 			var eepromText string
 			if m.ConfiguringEeprom {
 				eepromText = "Configuring..."
-				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
+				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				eepromText = "Config EEPROM"
 				if m.ActiveList == 4 && !m.Flashing && !m.Extracting {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorLilac))
+				} else if m.Flashing || m.Extracting {
+					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 				} else {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
 				}
@@ -271,11 +275,13 @@ func (m Model) renderButtons(styles struct {
 			var eepromText string
 			if m.ConfiguringEeprom {
 				eepromText = "Configuring..."
-				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
+				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				eepromText = "Config EEPROM"
 				if m.ActiveList == 4 && !m.Flashing && !m.Extracting {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorLilac))
+				} else if m.Flashing || m.Extracting {
+					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 				} else {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
 				}

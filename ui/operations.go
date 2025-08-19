@@ -305,6 +305,7 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 
 	// Set extraction state immediately
 	m.Extracting = true
+	m.ExtractStartTime = time.Now() // Record the start time
 	m.AddLog(fmt.Sprintf("> Uncompressing %s to %s...", filepath.Base(compressedPath), filepath.Base(outputPath)))
 
 	// Force cleanup of any previous state
