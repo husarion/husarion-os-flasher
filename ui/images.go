@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"github.com/husarion/husarion-os-flasher/util"
 
 	"github.com/creack/pty"
@@ -152,65 +153,96 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 				return 0, nil, nil
 			})
 
-			for scanner.Scan() {
-				line := scanner.Text()
-				trimmed := strings.TrimSpace(line)
-				if len(trimmed) > 0 {
-					// Safe send to progress channel
-					select {
-					case progressChan <- ProgressMsg(trimmed):
-					default:
-						// Channel might be closed, exit gracefully
-						return
-					}
-				}
-			}
+			// Use a channel to monitor process completion with timeout
+			done := make(chan error, 1)
+			go func() {
+				done <- cmd.Wait()
+			}()
 
-			if err := cmd.Wait(); err != nil {
-				// Check if the error might be due to xz corruption
-				var errMsg error
-				if isCompressed {
-					// Try to read any error output from xz
-					if xzErrorData, readErr := os.ReadFile("/tmp/xz_error"); readErr == nil && len(xzErrorData) > 0 {
-						errMsg = fmt.Errorf("compressed file error: %s", string(xzErrorData))
+			// Track last progress to detect hangs
+			lastProgressTime := time.Now()
+			progressTimeout := 60 * time.Second // 60 seconds without progress = timeout
+
+			for {
+				select {
+				case err := <-done:
+					// Process completed normally, handle the result
+					if err != nil {
+						// Check if the error might be due to xz corruption
+						var errMsg error
+						if isCompressed {
+							// Try to read any error output from xz
+							if xzErrorData, readErr := os.ReadFile("/tmp/xz_error"); readErr == nil && len(xzErrorData) > 0 {
+								errMsg = fmt.Errorf("compressed file error: %s", string(xzErrorData))
+							} else {
+								errMsg = fmt.Errorf("decompression or dd command failed: %v", err)
+							}
+						} else {
+							errMsg = fmt.Errorf("dd command failed: %v", err)
+						}
+						
+						// Safe send to progress channel
+						select {
+						case progressChan <- ErrorMsg{Err: errMsg}:
+						default:
+							return
+						}
 					} else {
-						errMsg = fmt.Errorf("decompression or dd command failed: %v", err)
+						select {
+						case progressChan <- ProgressMsg("Syncing..."):
+						default:
+							return
+						}
+						
+						if err := exec.Command("sync").Run(); err != nil {
+							select {
+							case progressChan <- ErrorMsg{Err: fmt.Errorf("sync failed: %v", err)}:
+							default:
+								return
+							}
+						} else {
+							select {
+							case progressChan <- ProgressMsg("Sync completed successfully."):
+							default:
+								return
+							}
+							
+							// Include source and destination in the done message
+							select {
+							case progressChan <- DoneMsg{Src: src, Dst: dst}:
+							default:
+								return
+							}
+						}
 					}
-				} else {
-					errMsg = fmt.Errorf("dd command failed: %v", err)
-				}
-				
-				// Safe send to progress channel
-				select {
-				case progressChan <- ErrorMsg{Err: errMsg}:
-				default:
 					return
-				}
-			} else {
-				select {
-				case progressChan <- ProgressMsg("Syncing..."):
-				default:
-					return
-				}
-				
-				if err := exec.Command("sync").Run(); err != nil {
-					select {
-					case progressChan <- ErrorMsg{Err: fmt.Errorf("sync failed: %v", err)}:
-					default:
-						return
-					}
-				} else {
-					select {
-					case progressChan <- ProgressMsg("Sync completed successfully."):
-					default:
-						return
-					}
-					
-					// Include source and destination in the done message
-					select {
-					case progressChan <- DoneMsg{Src: src, Dst: dst}:
-					default:
-						return
+
+				case <-time.After(1 * time.Second):
+					// Check for new progress every second
+					if scanner.Scan() {
+						line := scanner.Text()
+						trimmed := strings.TrimSpace(line)
+						if len(trimmed) > 0 {
+							lastProgressTime = time.Now() // Reset timeout
+							// Safe send to progress channel
+							select {
+							case progressChan <- ProgressMsg(trimmed):
+							default:
+								// Channel might be closed, exit gracefully
+								return
+							}
+						}
+					} else {
+						// Scanner finished, check for timeout
+						if time.Since(lastProgressTime) > progressTimeout {
+							// No progress for too long, likely hung
+							select {
+							case progressChan <- ErrorMsg{Err: fmt.Errorf("operation timed out - no progress for %v", progressTimeout)}:
+							default:
+								return
+							}
+							return
+						}
 					}
 				}
 			}
