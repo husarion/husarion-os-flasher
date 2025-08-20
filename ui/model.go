@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
+	"github.com/husarion/husarion-os-flasher/util"
 )
 
 // Model represents the application state
@@ -93,8 +95,71 @@ func (m *Model) AddLog(msg string) {
 		m.Logs = append(m.Logs, msg)
 	}
 
-	// Update the viewport content with all logs
-	m.Viewport.SetContent("Logs:\n" + strings.Join(m.Logs, "\n"))
+	// Update the viewport content with all logs, applying word wrapping
+	var wrappedLogs []string
+	// Get the viewport width, minus some padding for borders
+	logWidth := m.Viewport.Width - 2
+	if logWidth < 10 {
+		logWidth = 50 // Fallback minimum width
+	}
+	
+	for _, log := range m.Logs {
+		// Check if this log has ANSI color codes (styled text)
+		hasColor := strings.Contains(log, "\x1b[")
+		
+		if hasColor {
+			// Extract the style information and plain text
+			plainText := stripANSI(log)
+			wrapped := util.WrapText(plainText, logWidth)
+			
+			// Detect the original color from the log message
+			var originalColor string
+			if strings.Contains(log, "38;2;0;255;0") || strings.Contains(log, "\x1b[32m") {
+				// Green color (success messages)
+				originalColor = "#00FF00"
+			} else if strings.Contains(log, "38;2;255;204;0") || strings.Contains(log, "\x1b[33m") || strings.Contains(log, "38;2;255;255;0") {
+				// Yellow color (warning/abort messages) - check for both RGB variants
+				originalColor = "#FFCC00"
+			} else if strings.Contains(log, "38;2;255;0;0") || strings.Contains(log, "\x1b[31m") {
+				// Red color (error messages)
+				originalColor = "#FF0000"
+			} else {
+				// If we can't detect the color but it has ANSI codes, let's preserve it
+				// by checking the first few characters for common patterns
+				if strings.Contains(plainText, "Operation aborted") || strings.Contains(plainText, "aborted") {
+					originalColor = "#FFCC00" // Force yellow for abort messages
+				} else if strings.Contains(plainText, "successfully") || strings.Contains(plainText, "completed") {
+					originalColor = "#00FF00" // Force green for success messages
+				} else if strings.Contains(plainText, "Error") || strings.Contains(plainText, "failed") {
+					originalColor = "#FF0000" // Force red for error messages
+				} else {
+					// Default fallback
+					originalColor = "#00FF00"
+				}
+			}
+			
+			// Apply the original styling to each wrapped line
+			wrappedLines := strings.Split(wrapped, "\n")
+			var styledLines []string
+			for _, line := range wrappedLines {
+				if strings.TrimSpace(line) != "" {
+					// Reapply the detected color to each line
+					styledLine := lipgloss.NewStyle().
+						Foreground(lipgloss.Color(originalColor)).
+						Bold(true).
+						Render(line)
+					styledLines = append(styledLines, styledLine)
+				}
+			}
+			wrappedLogs = append(wrappedLogs, strings.Join(styledLines, "\n"))
+		} else {
+			// Regular text, just wrap normally
+			wrapped := util.WrapText(log, logWidth)
+			wrappedLogs = append(wrappedLogs, wrapped)
+		}
+	}
+	
+	m.Viewport.SetContent("Logs:\n" + strings.Join(wrappedLogs, "\n"))
 	m.Viewport.GotoBottom()
 }
 
@@ -123,31 +188,58 @@ func (m *Model) Refresh() {
 func (m *Model) HandleMouseWheel(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	var keyMsg tea.KeyMsg
 
-	if msg.Button == tea.MouseButtonWheelUp {
-		if m.ActiveList == 0 {
+	// Check if mouse is over the viewport area first - allow scrolling regardless of focus
+	if m.Zones.Get("viewport-view").InBounds(msg) {
+		// Try passing the mouse message directly to the viewport first
+		var cmd tea.Cmd
+		m.Viewport, cmd = m.Viewport.Update(msg)
+		if cmd != nil {
+			return m, cmd
+		}
+		
+		// Fallback to keyboard events if mouse message doesn't work
+		if msg.Button == tea.MouseButtonWheelUp {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.Viewport, _ = m.Viewport.Update(keyMsg)
+			return m, nil
+		} else if msg.Button == tea.MouseButtonWheelDown {
 			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-			m.DeviceList, _ = m.DeviceList.Update(keyMsg)
-		} else if m.ActiveList == 1 {
-			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-			m.ImageList, _ = m.ImageList.Update(keyMsg)
-		} else if m.ActiveList == 2 {
-			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
-			m.Viewport.Update(keyMsg)
+			m.Viewport, _ = m.Viewport.Update(keyMsg)
 			return m, nil
 		}
-	} else if msg.Button == tea.MouseButtonWheelDown {
-		if m.ActiveList == 0 {
+	}
+
+	// Check if mouse is over device list area
+	if m.Zones.Get("device-view").InBounds(msg) {
+		if msg.Button == tea.MouseButtonWheelUp {
 			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
 			m.DeviceList, _ = m.DeviceList.Update(keyMsg)
-		} else if m.ActiveList == 1 {
+			return m, nil
+		} else if msg.Button == tea.MouseButtonWheelDown {
+			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
+			m.DeviceList, _ = m.DeviceList.Update(keyMsg)
+			return m, nil
+		}
+	}
+
+	// Check if mouse is over image list area
+	if m.Zones.Get("image-view").InBounds(msg) {
+		if msg.Button == tea.MouseButtonWheelUp {
+			keyMsg = tea.KeyMsg{Type: tea.KeyUp}
+			m.ImageList, _ = m.ImageList.Update(keyMsg)
+			return m, nil
+		} else if msg.Button == tea.MouseButtonWheelDown {
 			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
 			m.ImageList, _ = m.ImageList.Update(keyMsg)
-		} else if m.ActiveList == 2 {
-			keyMsg = tea.KeyMsg{Type: tea.KeyDown}
-			m.Viewport.Update(keyMsg)
 			return m, nil
 		}
 	}
 
 	return m, nil
+}
+
+// stripANSI removes ANSI escape sequences from a string
+func stripANSI(s string) string {
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansiRegex.ReplaceAllString(s, "")
 }

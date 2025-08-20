@@ -68,3 +68,29 @@ func FormatDuration(d time.Duration) string {
 	
 	return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
 }
+
+// WrapText wraps text to fit within a specified width
+func WrapText(text string, width int) string {
+	if len(text) <= width {
+		return text
+	}
+	
+	var result strings.Builder
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+	
+	line := words[0]
+	for _, word := range words[1:] {
+		if len(line)+ 1 + len(word) <= width {
+			line += " " + word
+		} else {
+			result.WriteString(line + "\n")
+			line = word
+		}
+	}
+	result.WriteString(line)
+	
+	return result.String()
+}

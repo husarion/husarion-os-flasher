@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -15,6 +16,68 @@ import (
 	
 	"github.com/husarion/husarion-os-flasher/util"
 )
+
+// wrappingDelegate is a custom list delegate that intelligently truncates long text
+type wrappingDelegate struct {
+	list.DefaultDelegate
+}
+
+// newWrappingDelegate creates a new wrapping delegate
+func newWrappingDelegate() wrappingDelegate {
+	d := wrappingDelegate{
+		DefaultDelegate: list.NewDefaultDelegate(),
+	}
+	return d
+}
+
+// smartTruncate intelligently truncates long filenames to show the most relevant parts
+func smartTruncate(text string, maxWidth int) string {
+	if len(text) <= maxWidth {
+		return text
+	}
+	
+	// For filenames, prioritize showing the beginning and end
+	if maxWidth < 10 {
+		return text[:maxWidth-3] + "..."
+	}
+	
+	// Show first part + "..." + last part
+	prefixLen := maxWidth/2 - 2
+	suffixLen := maxWidth - prefixLen - 3
+	
+	if prefixLen > 0 && suffixLen > 0 {
+		return text[:prefixLen] + "..." + text[len(text)-suffixLen:]
+	}
+	
+	return text[:maxWidth-3] + "..."
+}
+
+// Render renders the list item with intelligent truncation for long titles
+func (d wrappingDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	realItem := item.(Item)
+	
+	// Get the actual width from the list model
+	listWidth := m.Width()
+	
+	// Calculate available width for the filename (subtract padding and decorations)
+	availableWidth := listWidth - 15 // More padding for borders, selections, etc.
+	if availableWidth < 15 {
+		availableWidth = 15 // Minimum reasonable width
+	}
+	
+	// Intelligently truncate the title if it's too long
+	truncatedTitle := smartTruncate(realItem.title, availableWidth)
+	
+	// Create a new item with the truncated title
+	truncatedItem := Item{
+		title: truncatedTitle,
+		value: realItem.value,
+		desc:  realItem.desc,
+	}
+	
+	// Use the default delegate to render with the truncated title
+	d.DefaultDelegate.Render(w, m, index, truncatedItem)
+}
 
 // NewModel creates a new model for the application
 func NewModel(osImgPath string, termWidth, termHeight int) Model {
@@ -51,11 +114,17 @@ func NewModel(osImgPath string, termWidth, termHeight int) Model {
 		imageItems = append(imageItems, Item{title: filepath.Base(img), value: img, desc: "OS Image"})
 	}
 
-	// Use default delegates (no custom red selection styles)
+	// Use default delegate for devices, custom truncating delegate for images
 	deviceDelegate := list.NewDefaultDelegate()
-	imageDelegate := list.NewDefaultDelegate()
+	imageDelegate := newWrappingDelegate() // Intelligent truncation
 
-	deviceList := list.New(deviceItems, deviceDelegate, termWidth, 7)
+	// Calculate fixed widths for horizontal layout
+	listWidth := termWidth / 2
+	if listWidth < 30 {
+		listWidth = 30 // Minimum width
+	}
+
+	deviceList := list.New(deviceItems, deviceDelegate, listWidth, 7)
 	deviceList.Title = "  Select Target Device  "
 	deviceList.SetShowTitle(true)
 	deviceList.SetShowHelp(false)
@@ -66,7 +135,7 @@ func NewModel(osImgPath string, termWidth, termHeight int) Model {
 		Background(lipgloss.Color(ColorPantone)).
 		Padding(0, 1)
 
-	imageList := list.New(imageItems, imageDelegate, termWidth, 7)
+	imageList := list.New(imageItems, imageDelegate, listWidth, 7)
 	imageList.Title = "    Select Image File   "
 	imageList.SetShowTitle(true)
 	imageList.SetShowHelp(false)
@@ -124,11 +193,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Height = 20
 		}
 
+		// Update viewport width
 		vw := m.Width - 4
 		if vw < 10 {
 			vw = 10
 		}
 		m.Viewport.Width = vw
+		
+		// Update list widths to be fixed and equal
+		listWidth := m.Width / 2
+		if listWidth < 30 {
+			listWidth = 30 // Minimum width
+		}
+		m.DeviceList.SetSize(listWidth, m.DeviceList.Height())
+		m.ImageList.SetSize(listWidth, m.ImageList.Height())
+		
 		return m, nil
 
 	case TickMsg:
