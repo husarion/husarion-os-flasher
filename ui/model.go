@@ -41,6 +41,10 @@ type Model struct {
 	OsImgPath         string        // Store the image path for refreshes
 	FlashStartTime    time.Time     // Track when flashing started
 	ExtractStartTime  time.Time     // Track when extraction started
+
+	// Track current extraction file paths
+	ExtractOutputPath string // final .img path
+	ExtractTempPath   string // temporary .part path
 }
 
 // Item represents an entry in a list (device or image)

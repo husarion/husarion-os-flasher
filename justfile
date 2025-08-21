@@ -45,3 +45,4 @@ reset-changes:
 
     echo "Local branch '$branch' has been reset to match origin/$branch."
     exit 0
+

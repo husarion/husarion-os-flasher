@@ -26,14 +26,17 @@ func GetImageFiles(osImgPath string) ([]string, error) {
 
 	var images []string
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			ext := filepath.Ext(entry.Name())
-			name := entry.Name()
+		// Skip directories and macOS metadata items
+		name := entry.Name()
+		if entry.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "._") {
+			continue
+		}
 
-			// Support both .img and .img.xz files
-			if ext == ".img" || (ext == ".xz" && strings.HasSuffix(name, ".img.xz")) {
-				images = append(images, filepath.Join(osImgPath, name))
-			}
+		ext := filepath.Ext(name)
+
+		// Support both .img and .img.xz files
+		if ext == ".img" || (ext == ".xz" && strings.HasSuffix(name, ".img.xz")) {
+			images = append(images, filepath.Join(osImgPath, name))
 		}
 	}
 

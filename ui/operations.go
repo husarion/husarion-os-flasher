@@ -114,20 +114,18 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 		m.AddLog("Aborting extraction process... (please wait)")
 
 		return m, tea.Sequence(
-			tea.Tick(10*time.Millisecond, func(time.Time) tea.Msg { 
-				return nil 
-			}),
+			tea.Tick(10*time.Millisecond, func(time.Time) tea.Msg { return nil }),
 			tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
 				// Kill the process
-				err := m.ExtractCmd.Process.Kill()
-				if err != nil {
+				if err := m.ExtractCmd.Process.Kill(); err != nil {
 					return ErrorMsg{Err: fmt.Errorf("error aborting extraction: %v", err)}
 				}
-				// Close the pty to ensure proper cleanup
-				if m.ExtractPty != nil {
-					m.ExtractPty.Close()
-				}
-				// Don't close the progress channel here - let the goroutine handle it
+				if m.ExtractPty != nil { _ = m.ExtractPty.Close() }
+
+				// Remove temp and partial files
+				if m.ExtractTempPath != "" { _ = os.Remove(m.ExtractTempPath) }
+				if m.ExtractOutputPath != "" { _ = os.Remove(m.ExtractOutputPath) }
+
 				return AbortCompletedMsg{}
 			}),
 		)
@@ -142,7 +140,11 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 	return func() tea.Msg {
 		// Send an initial message to ensure the progress listener is active
 		progressChan <- ProgressMsg("Preparing extraction...")
-		
+
+		// Always write to a temp file to avoid half-baked .img
+		tempPath := outputPath + ".part"
+		_ = os.Remove(tempPath) // best-effort cleanup from previous runs
+
 		// Get compressed file size for initial info
 		fileInfo, err := os.Stat(compressedPath)
 		if err != nil {
@@ -195,18 +197,16 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 			util.FormatBytes(compressedSize), util.FormatBytes(uncompressedSize)))
 
 		// Use the same pattern as flashing: xz to decompress and pv to show progress
-		// Key fix: use dd to write the file so pv's stderr progress goes to pty, not lost to redirection
+		// Key fix: write to temp file and rename on success
 		var cmd *exec.Cmd
 		if uncompressedSize > 0 {
-			// Use pv with size parameter for accurate progress reporting (like flashing does)
-			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s)...", util.FormatBytes(uncompressedSize)))
+			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s) → %s", util.FormatBytes(uncompressedSize), filepath.Base(tempPath)))
 			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f -s %d | dd of='%s' bs=1k", 
-				compressedPath, uncompressedSize, outputPath))
+				compressedPath, uncompressedSize, tempPath))
 		} else {
-			// Fallback if we couldn't determine the size
 			progressChan <- ProgressMsg("Extracting (no size info)...")
 			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f | dd of='%s' bs=1k", 
-				compressedPath, outputPath))
+				compressedPath, tempPath))
 		}
 
 		// Use pty.Start like flashing does to capture the progress bar
@@ -249,6 +249,8 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 			}
 
 			if err := cmd.Wait(); err != nil {
+				// On failure, ensure temp file is removed
+				_ = os.Remove(tempPath)
 				// Safe send to progress channel
 				select {
 				case progressChan <- ErrorMsg{Err: fmt.Errorf("extraction failed: %v", err)}:
@@ -257,7 +259,20 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 					return
 				}
 			} else {
-				// Get the actual final extracted file size
+				// Sync and atomically move temp to final name
+				_ = exec.Command("sync").Run()
+				if err := os.Rename(tempPath, outputPath); err != nil {
+					_ = os.Remove(tempPath)
+					// Safe send to progress channel
+					select {
+					case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to finalize extracted image: %v", err)}:
+					default:
+						return
+					}
+					return
+				}
+
+				// Get final size and notify
 				if finalInfo, err := os.Stat(outputPath); err == nil {
 					finalSize := finalInfo.Size()
 					select {
@@ -266,12 +281,8 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 						return
 					}
 				}
-				
 				select {
-				case progressChan <- ExtractCompletedMsg{
-					Src: compressedPath,
-					Dst: outputPath,
-				}:
+				case progressChan <- ExtractCompletedMsg{Src: compressedPath, Dst: outputPath}:
 				default:
 					return
 				}
@@ -290,6 +301,11 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 
 	compressedPath := m.ImageList.SelectedItem().(Item).value
 	outputPath := strings.TrimSuffix(compressedPath, ".xz")
+
+	// Track paths on the model for abort cleanup
+	m.ExtractOutputPath = outputPath
+	m.ExtractTempPath = outputPath + ".part"
+	_ = os.Remove(m.ExtractTempPath)
 
 	// Check if output file already exists
 	if _, err := os.Stat(outputPath); err == nil {
