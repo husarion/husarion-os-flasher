@@ -187,7 +187,7 @@ func (m Model) renderButtons(styles struct {
 	if m.Flashing {
 		buttonText = "Flashing..."
 	} else {
-		buttonText = "Flash Image"
+		buttonText = "Flash"
 	}
 	
 	// Base styles
@@ -256,7 +256,7 @@ func (m Model) renderButtons(styles struct {
 			uncompressText = "Extracting..."
 			uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorDisabled))
 		} else {
-			uncompressText = "Extract Image"
+			uncompressText = "Extract"
 			if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing && !m.Checking) || (!util.IsRaspberryPi() && m.ActiveList == 4 && !m.Flashing && !m.Checking) {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorLilac))
 			} else if m.Flashing || m.Checking {
