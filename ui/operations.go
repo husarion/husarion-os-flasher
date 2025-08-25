@@ -201,11 +201,11 @@ func ExtractWithProgress(compressedPath, outputPath string, progressChan chan te
 		var cmd *exec.Cmd
 		if uncompressedSize > 0 {
 			progressChan <- ProgressMsg(fmt.Sprintf("Extracting (size: %s) → %s", util.FormatBytes(uncompressedSize), filepath.Base(tempPath)))
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f -s %d | dd of='%s' bs=1k", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f -s %d | dd of='%s' bs=16M", 
 				compressedPath, uncompressedSize, tempPath))
 		} else {
 			progressChan <- ProgressMsg("Extracting (no size info)...")
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f | dd of='%s' bs=1k", 
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc '%s' | pv -f | dd of='%s' bs=16M", 
 				compressedPath, tempPath))
 		}
 
