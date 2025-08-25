@@ -199,12 +199,8 @@ func (m Model) renderButtons(styles struct {
 	} else if m.ActiveList == 3 {
 		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorPantone))
 	} else {
+		// Ensure Flash has a visible background when idle and not selected
 		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorAnthracite))
-		if !m.Ready {
-			buttonStyle = buttonStyle.Background(lipgloss.Color(ColorAnthracite))
-		} else {
-			buttonStyle = buttonStyle.Background(lipgloss.Color("#505050"))
-		}
 	}
 
 	flashButton := m.Zones.Mark("flash-button", buttonStyle.Render(buttonText))
@@ -323,7 +319,10 @@ func (m Model) renderButtons(styles struct {
 			checkStyle = checkStyle.Background(lipgloss.Color(ColorDisabled))
 		} else {
 			checkText = " Check "
-			if m.ActiveList == 7 && !m.Flashing && !m.Extracting {
+			if m.Flashing || m.Extracting {
+				// Disable Check while flashing raw .img
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorDisabled))
+			} else if m.ActiveList == 7 {
 				checkStyle = checkStyle.Background(lipgloss.Color(ColorLilac))
 			} else {
 				checkStyle = checkStyle.Background(lipgloss.Color(ColorAnthracite))
