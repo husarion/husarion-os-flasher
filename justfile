@@ -17,6 +17,7 @@ setup-go:
 build:
     #!/bin/bash
     export PATH=$PATH:/usr/local/go/bin
+    sudo pkill -f husarion-os-flasher
     go build -o husarion-os-flasher
 
 rebuild-on-save:
@@ -33,3 +34,15 @@ restart-on-build:
     while true; do
         ./husarion-os-flasher
     done
+
+reset-changes:
+    #!/bin/bash
+    branch=$(git rev-parse --abbrev-ref HEAD)
+
+    git fetch origin
+    git reset --hard origin/$branch
+    git clean -fd
+
+    echo "Local branch '$branch' has been reset to match origin/$branch."
+    exit 0
+
