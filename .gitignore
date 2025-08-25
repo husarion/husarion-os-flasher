@@ -3,3 +3,4 @@ husarion-os-flasher
 /docs
 *.img 
 *.img.xz
+*.img.part
