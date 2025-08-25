@@ -3,7 +3,9 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"gopkg.in/yaml.v3"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/husarion/husarion-os-flasher/util"
 )
@@ -37,6 +39,9 @@ func (m Model) View() string {
 	} else {
 		diskInfo = "No disk selected"
 	}
+
+	integrityStatus := "unknown"
+	integrityActual := ""
 	if m.ImageList.SelectedItem() != nil {
 		image := m.ImageList.SelectedItem().(Item).value
 		stat, err := os.Stat(image)
@@ -45,10 +50,30 @@ func (m Model) View() string {
 		} else {
 			imageInfo = image + " (size: " + util.FormatBytes(stat.Size()) + ")"
 		}
+		// Load integrity.yaml from the image's directory and look up status
+		yamlPath := filepath.Join(filepath.Dir(image), "integrity.yaml")
+		if b, err := os.ReadFile(yamlPath); err == nil {
+			var doc IntegrityFile
+			if yaml.Unmarshal(b, &doc) == nil && doc.Files != nil {
+				if entry, ok := doc.Files[filepath.Base(image)]; ok {
+					if entry.Status != "" {
+						integrityStatus = entry.Status
+					}
+					if entry.Actual != "" {
+						integrityActual = entry.Actual
+					}
+				}
+			}
+		}
 	} else {
 		imageInfo = "No image selected"
 	}
-	infoPanel := styles.InfoPanel.Render("Disk: " + diskInfo + "\nImage: " + imageInfo)
+
+	integrityLine := "Integrity check: " + integrityStatus
+	if integrityActual != "" {
+		integrityLine += ", actual: " + integrityActual
+	}
+	infoPanel := styles.InfoPanel.Render("Disk: " + diskInfo + "\nImage: " + imageInfo + "\n" + integrityLine)
 
 	// Header
 	header := styles.Header.Render(" Husarion OS Flasher ")
@@ -169,7 +194,7 @@ func (m Model) renderButtons(styles struct {
 	buttonStyle = styles.Button
 	
 	// Apply background color based on state and selection
-	if m.Flashing || m.Extracting {
+	if m.Flashing || m.Extracting || m.Checking {
 		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorDisabled))
 	} else if m.ActiveList == 3 {
 		buttonStyle = buttonStyle.Background(lipgloss.Color(ColorPantone))
@@ -189,18 +214,18 @@ func (m Model) renderButtons(styles struct {
 	
 	// Create abort button that appears during any operation
 	var abortButton string
-	if m.Flashing || m.Extracting {
+	if m.Flashing || m.Extracting || m.Checking {
 		abortStyle := styles.AbortButton
 		// Determine expected abort index based on layout
 		abortIndex := -1
 		if util.IsRaspberryPi() {
-			if m.IsCompressedImageSelected() || m.Extracting {
+			if m.IsCompressedImageSelected() || m.Extracting || m.Checking {
 				abortIndex = 6
 			} else {
 				abortIndex = 5
 			}
 		} else {
-			if m.IsCompressedImageSelected() || m.Extracting {
+			if m.IsCompressedImageSelected() || m.Extracting || m.Checking {
 				abortIndex = 5
 			} else {
 				abortIndex = 4
@@ -222,7 +247,8 @@ func (m Model) renderButtons(styles struct {
 		abortButton = m.Zones.Mark("abort-button", abortStyle.Render(abortText))
 	}
 
-	// Add uncompress button if compressed image is selected OR extracting
+	// Add uncompress button only when a compressed image is selected OR currently extracting
+	var checkButton string
 	if m.IsCompressedImageSelected() || m.Extracting {
 		uncompressStyle := styles.Button
 		var uncompressText string
@@ -231,15 +257,34 @@ func (m Model) renderButtons(styles struct {
 			uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorDisabled))
 		} else {
 			uncompressText = "Extract Image"
-			if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing) || (!util.IsRaspberryPi() && m.ActiveList == 4 && !m.Flashing) {
+			if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing && !m.Checking) || (!util.IsRaspberryPi() && m.ActiveList == 4 && !m.Flashing && !m.Checking) {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorLilac))
-			} else if m.Flashing {
+			} else if m.Flashing || m.Checking {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				uncompressStyle = uncompressStyle.Background(lipgloss.Color(ColorAnthracite))
 			}
 		}
 		buttonUncompress := m.Zones.Mark("uncompress-button", uncompressStyle.Render(uncompressText))
+
+		// Integrity Check button
+		checkStyle := styles.Button
+		var checkText string
+		if m.Checking {
+			checkText = "Checking..."
+			checkStyle = checkStyle.Background(lipgloss.Color(ColorDisabled))
+		} else {
+			checkText = " Check "
+			if m.ActiveList == 7 && !m.Flashing && !m.Extracting {
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorLilac))
+			} else if m.Flashing || m.Extracting {
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorDisabled))
+			} else {
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorAnthracite))
+			}
+		}
+		checkButton = m.Zones.Mark("check-button", checkStyle.Render(checkText))
+
 		if util.IsRaspberryPi() {
 			eepromStyle := styles.Button
 			var eepromText string
@@ -248,28 +293,44 @@ func (m Model) renderButtons(styles struct {
 				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				eepromText = "Config EEPROM"
-				if m.ActiveList == 4 && !m.Flashing && !m.Extracting {
+				if m.ActiveList == 4 && !m.Flashing && !m.Extracting && !m.Checking {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorLilac))
-				} else if m.Flashing || m.Extracting {
+				} else if m.Flashing || m.Extracting || m.Checking {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 				} else {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
 				}
 			}
 			buttonEeprom := m.Zones.Mark("eeprom-button", eepromStyle.Render(eepromText))
-			if m.Flashing || m.Extracting {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, buttonUncompress, abortButton)
+			if m.Flashing || m.Extracting || m.Checking {
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, buttonUncompress, checkButton, abortButton)
 			} else {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, buttonUncompress)
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, buttonUncompress, checkButton)
 			}
 		} else {
-			if m.Flashing || m.Extracting {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonUncompress, abortButton)
+			if m.Flashing || m.Extracting || m.Checking {
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonUncompress, checkButton, abortButton)
 			} else {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonUncompress)
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonUncompress, checkButton)
 			}
 		}
 	} else {
+		// Raw .img branch (no Extract button)
+		checkStyle := styles.Button
+		var checkText string
+		if m.Checking {
+			checkText = "Checking..."
+			checkStyle = checkStyle.Background(lipgloss.Color(ColorDisabled))
+		} else {
+			checkText = " Check "
+			if m.ActiveList == 7 && !m.Flashing && !m.Extracting {
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorLilac))
+			} else {
+				checkStyle = checkStyle.Background(lipgloss.Color(ColorAnthracite))
+			}
+		}
+		checkButton = m.Zones.Mark("check-button", checkStyle.Render(checkText))
+
 		if util.IsRaspberryPi() {
 			eepromStyle := styles.Button
 			var eepromText string
@@ -278,25 +339,25 @@ func (m Model) renderButtons(styles struct {
 				eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 			} else {
 				eepromText = "Config EEPROM"
-				if m.ActiveList == 4 && !m.Flashing && !m.Extracting {
+				if m.ActiveList == 4 && !m.Flashing && !m.Extracting && !m.Checking {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorLilac))
-				} else if m.Flashing || m.Extracting {
+				} else if m.Flashing || m.Extracting || m.Checking {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorDisabled))
 				} else {
 					eepromStyle = eepromStyle.Background(lipgloss.Color(ColorAnthracite))
 				}
 			}
 			buttonEeprom := m.Zones.Mark("eeprom-button", eepromStyle.Render(eepromText))
-			if m.Flashing || m.Extracting {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, abortButton)
+			if m.Flashing || m.Extracting || m.Checking {
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, checkButton, abortButton)
 			} else {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom)
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, buttonEeprom, checkButton)
 			}
 		} else {
-			if m.Flashing || m.Extracting {
-				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, abortButton)
+			if m.Flashing || m.Extracting || m.Checking {
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, checkButton, abortButton)
 			} else {
-				buttonView = flashButton
+				buttonView = lipgloss.JoinHorizontal(lipgloss.Center, flashButton, checkButton)
 			}
 		}
 	}

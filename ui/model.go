@@ -45,6 +45,11 @@ type Model struct {
 	// Track current extraction file paths
 	ExtractOutputPath string // final .img path
 	ExtractTempPath   string // temporary .part path
+
+	// Integrity check state
+	Checking  bool
+	CheckCmd  *exec.Cmd
+	CheckPty  *os.File
 }
 
 // Item represents an entry in a list (device or image)
@@ -75,11 +80,11 @@ func (m Model) IsCompressedImageSelected() bool {
 // AddLog adds a log entry with overflow protection
 func (m *Model) AddLog(msg string) {
 	// Check if this is an error message (starts with "Error:")
-	isError := strings.HasPrefix(msg, "Error:") || strings.Contains(msg, "error")
+	lowerMsg := strings.ToLower(msg)
+	isError := strings.HasPrefix(lowerMsg, "error:") || strings.Contains(lowerMsg, "error")
 	
 	// Apply red styling to error messages
 	if isError {
-		// Style with red text
 		msg = lipgloss.NewStyle().Foreground(lipgloss.Color(ColorError)).Render(msg)
 	}
 
@@ -119,26 +124,22 @@ func (m *Model) AddLog(msg string) {
 			// Detect the original color from the log message
 			var originalColor string
 			if strings.Contains(log, "38;2;0;255;0") || strings.Contains(log, "\x1b[32m") {
-				// Green color (success messages)
-				originalColor = "#00FF00"
+				originalColor = "#00FF00" // Green
 			} else if strings.Contains(log, "38;2;255;204;0") || strings.Contains(log, "\x1b[33m") || strings.Contains(log, "38;2;255;255;0") {
-				// Yellow color (warning/abort messages) - check for both RGB variants
-				originalColor = "#FFCC00"
+				originalColor = "#FFCC00" // Yellow
 			} else if strings.Contains(log, "38;2;255;0;0") || strings.Contains(log, "\x1b[31m") {
-				// Red color (error messages)
-				originalColor = "#FF0000"
+				originalColor = "#FF0000" // Red
 			} else {
-				// If we can't detect the color but it has ANSI codes, let's preserve it
-				// by checking the first few characters for common patterns
-				if strings.Contains(plainText, "Operation aborted") || strings.Contains(plainText, "aborted") {
-					originalColor = "#FFCC00" // Force yellow for abort messages
-				} else if strings.Contains(plainText, "successfully") || strings.Contains(plainText, "completed") {
-					originalColor = "#00FF00" // Force green for success messages
-				} else if strings.Contains(plainText, "Error") || strings.Contains(plainText, "failed") {
-					originalColor = "#FF0000" // Force red for error messages
+				// Case-insensitive keyword heuristics
+				p := strings.ToLower(plainText)
+				if strings.Contains(p, "operation aborted") || strings.Contains(p, "aborted") {
+					originalColor = "#FFCC00" // Yellow
+				} else if strings.Contains(p, "successfully") || strings.Contains(p, "completed") || strings.Contains(p, "ok") {
+					originalColor = "#00FF00" // Green
+				} else if strings.Contains(p, "error") || strings.Contains(p, "failed") || strings.Contains(p, "failure") {
+					originalColor = "#FF0000" // Red
 				} else {
-					// Default fallback
-					originalColor = "#00FF00"
+					originalColor = "#00FF00" // Fallback to green
 				}
 			}
 			
@@ -147,7 +148,6 @@ func (m *Model) AddLog(msg string) {
 			var styledLines []string
 			for _, line := range wrappedLines {
 				if strings.TrimSpace(line) != "" {
-					// Reapply the detected color to each line
 					styledLine := lipgloss.NewStyle().
 						Foreground(lipgloss.Color(originalColor)).
 						Bold(true).

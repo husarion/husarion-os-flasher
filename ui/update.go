@@ -218,8 +218,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ProgressMsg:
 		m.AddLog(string(msg))
-		// Continue listening for progress messages during both flashing and extraction
-		if m.Flashing || m.Extracting {
+		// Continue listening for progress messages during any long-running action
+		if m.Flashing || m.Extracting || m.Checking {
 			return m, ListenProgress(m.ProgressChan)
 		}
 		return m, nil
@@ -258,17 +258,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ErrorMsg:
 		m.Flashing = false
-		m.Aborting = false  // Reset aborting state
+		m.Aborting = false
 		m.ConfiguringEeprom = false
-		m.Extracting = false  // Also reset extracting state when an error occurs
-		
-		// Add "Error: " prefix to ensure it's caught by the styling logic
+		m.Extracting = false
+		m.Checking = false
 		m.AddLog(fmt.Sprintf("Error: %v", msg.Err))
 		m.DdCmd = nil
 		m.ExtractCmd = nil
-		// Clear pty references on error
+		m.CheckCmd = nil
 		m.DdPty = nil
 		m.ExtractPty = nil
+		m.CheckPty = nil
 		return m, nil
 
 	case DDStartedMsg:
@@ -314,6 +314,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return TickMsg(time.Now())
 		}
 
+	case CheckStartedMsg:
+		m.CheckCmd = msg.Cmd
+		m.CheckPty = msg.Pty
+		m.AddLog("Integrity check started - monitoring progress...")
+		return m, ListenProgress(m.ProgressChan)
+
+	case CheckCompletedMsg:
+		m.Checking = false
+		m.CheckCmd = nil
+		m.CheckPty = nil
+		if msg.Ok {
+			m.AddLog(lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")).Bold(true).Render("Integrity OK"))
+		} else {
+			m.AddLog(lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true).Render("Integrity FAILED"))
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKeyMsg(msg)
 
@@ -332,13 +349,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AbortCompletedMsg:
 		m.Flashing = false
 		m.Extracting = false
+		m.Checking = false
 		m.Aborting = false
-		// Clear command references after abort
 		m.DdCmd = nil
 		m.ExtractCmd = nil
-		// Clear pty references after abort
+		m.CheckCmd = nil
 		m.DdPty = nil
 		m.ExtractPty = nil
+		m.CheckPty = nil
 		m.AddLog(lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFCC00")).
 			Bold(true).
@@ -403,7 +421,7 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 	// Base focusable elements are the lists and viewport
 	validElements := []int{0, 1, 2}
 	
-	inOperation := m.Flashing || m.Extracting
+	inOperation := m.Flashing || m.Extracting || m.Checking
 	hasCompressedImage := m.IsCompressedImageSelected()
 	isPi := util.IsRaspberryPi()
 
@@ -411,13 +429,13 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 		// While an operation is running, only allow Abort among the buttons
 		abortIndex := -1
 		if isPi {
-			if hasCompressedImage || m.Extracting {
+			if hasCompressedImage || m.Extracting || m.Checking {
 				abortIndex = 6
 			} else {
 				abortIndex = 5
 			}
 		} else {
-			if hasCompressedImage || m.Extracting {
+			if hasCompressedImage || m.Extracting || m.Checking {
 				abortIndex = 5
 			} else {
 				abortIndex = 4
@@ -439,6 +457,8 @@ func (m Model) handleTab() (tea.Model, tea.Cmd) {
 				validElements = append(validElements, 4)
 			}
 		}
+		// Add a virtual index for Check button to be navigable
+		validElements = append(validElements, 7)
 	}
 	
 	// Find the next valid element greater than current
@@ -481,11 +501,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 				return m.UncompressImage()
 			}
 		}
-	} else if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing && !m.Extracting) {
+	} else if (util.IsRaspberryPi() && m.ActiveList == 5 && !m.Flashing && !m.Extracting && !m.Checking) {
 		// Extract button on Pi (only when not in an operation)
 		if m.IsCompressedImageSelected() {
 			return m.UncompressImage()
 		}
+	} else if m.ActiveList == 7 && !m.Flashing && !m.Extracting && !m.Checking {
+		// Check button (virtual index)
+		return m.StartIntegrityCheck()
 	} else if (util.IsRaspberryPi() && m.ActiveList == 6) || (!util.IsRaspberryPi() && m.ActiveList == 5) {
 		// This is the dedicated Abort button position
 		return m.AbortOperation()
@@ -537,6 +560,17 @@ func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.UncompressImage()
 		}
 		return m, nil // Return after handling the uncompress button
+	}
+
+	// Check button clicks
+	if m.Zones.Get("check-button").InBounds(msg) {
+		// Mark selection for proper highlighting
+		m.ActiveList = 7
+		// Only allow when idle
+		if !m.Flashing && !m.Extracting && !m.Checking {
+			return m.StartIntegrityCheck()
+		}
+		return m, nil
 	}
 
 	// Handle other element clicks
