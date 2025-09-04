@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/wish v1.4.6
 	github.com/creack/pty v1.1.24
 	github.com/lrstanley/bubblezone v0.0.0-20250222012949-f7fb4dcbadeb
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

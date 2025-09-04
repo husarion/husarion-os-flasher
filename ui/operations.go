@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/creack/pty"
 	"github.com/husarion/husarion-os-flasher/util"
+	"gopkg.in/yaml.v3"
 )
 
 // StartFlashing initiates the flashing process
@@ -126,6 +128,23 @@ func (m *Model) AbortOperation() (tea.Model, tea.Cmd) {
 				if m.ExtractTempPath != "" { _ = os.Remove(m.ExtractTempPath) }
 				if m.ExtractOutputPath != "" { _ = os.Remove(m.ExtractOutputPath) }
 
+				return AbortCompletedMsg{}
+			}),
+		)
+	}
+
+	// Check if we're checking integrity and have a command to abort
+	if m.Checking && m.CheckCmd != nil {
+		m.Aborting = true
+		m.AddLog("Aborting integrity check... (please wait)")
+
+		return m, tea.Sequence(
+			tea.Tick(10*time.Millisecond, func(time.Time) tea.Msg { return nil }),
+			tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+				if err := m.CheckCmd.Process.Kill(); err != nil {
+					return ErrorMsg{Err: fmt.Errorf("error aborting check: %v", err)}
+				}
+				if m.CheckPty != nil { _ = m.CheckPty.Close() }
 				return AbortCompletedMsg{}
 			}),
 		)
@@ -350,3 +369,236 @@ func (m *Model) UncompressImage() (tea.Model, tea.Cmd) {
 		ListenProgress(m.ProgressChan),
 	)
 }
+
+// StartIntegrityCheck initializes integrity checking for the selected image
+func (m *Model) StartIntegrityCheck() (tea.Model, tea.Cmd) {
+	if m.ImageList.SelectedItem() == nil || m.Checking || m.Flashing || m.Extracting {
+		return m, nil
+	}
+
+	imagePath := m.ImageList.SelectedItem().(Item).value
+
+	// Prepare state
+	m.ProgressChan = make(chan tea.Msg, 100)
+	m.Checking = true
+	m.Aborting = false
+	m.AddLog(fmt.Sprintf("> Checking integrity of %s...", filepath.Base(imagePath)))
+
+	// Focus Abort
+	if util.IsRaspberryPi() {
+		if m.IsCompressedImageSelected() {
+			m.ActiveList = 6
+		} else {
+			m.ActiveList = 5
+		}
+	} else {
+		if m.IsCompressedImageSelected() {
+			m.ActiveList = 5
+		} else {
+			m.ActiveList = 4
+		}
+	}
+
+	return m, tea.Batch(
+		CheckIntegrity(imagePath, m.ProgressChan),
+		ListenProgress(m.ProgressChan),
+	)
+}
+
+// CheckIntegrity streams progress while verifying the selected image
+// - For .img.xz: runs `xz -tv <file>` and streams its progress
+// - For .img: compares sha256sum of file against `<file>.checksum`; streams pv progress
+func CheckIntegrity(imagePath string, progressChan chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		isCompressed := strings.HasSuffix(imagePath, ".img.xz")
+
+		var cmd *exec.Cmd
+		var haveExpected bool
+		var expectedFromSidecar string
+		if isCompressed {
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -tv '%s'", imagePath))
+		} else {
+			checksumPath := imagePath + ".checksum"
+			if data, err := os.ReadFile(checksumPath); err == nil {
+				expectedFromSidecar = strings.TrimSpace(string(data))
+				if sp := strings.Fields(expectedFromSidecar); len(sp) > 0 { expectedFromSidecar = sp[0] }
+				if matched, _ := regexp.MatchString(`^[0-9a-fA-F]{64}$`, expectedFromSidecar); matched {
+					haveExpected = true
+				} else {
+					progressChan <- ProgressMsg(fmt.Sprintf("Warning: invalid checksum format in %s; will compute actual hash only", filepath.Base(checksumPath)))
+				}
+			} else {
+				progressChan <- ProgressMsg(fmt.Sprintf("No %s found; computing actual SHA-256 only", filepath.Base(checksumPath)))
+			}
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; pv -f '%s' | sha256sum", imagePath))
+		}
+
+		ptmx, err := pty.Start(cmd)
+		if err != nil { return ErrorMsg{Err: fmt.Errorf("failed to start integrity command: %v", err)} }
+		progressChan <- CheckStartedMsg{Cmd: cmd, Pty: ptmx}
+
+		go func() {
+			defer ptmx.Close()
+			scanner := bufio.NewScanner(ptmx)
+			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+				if i := bytes.IndexAny(data, "\r\n"); i >= 0 { return i + 1, data[:i], nil }
+				if atEOF && len(data) > 0 { return len(data), data, nil }
+				return 0, nil, nil
+			})
+
+			var finalHash string
+			hashRe := regexp.MustCompile(`^[0-9a-fA-F]{64}`)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" { continue }
+				if !isCompressed && hashRe.MatchString(line) {
+					fields := strings.Fields(line)
+					if len(fields) > 0 { finalHash = fields[0] }
+				}
+				select { case progressChan <- ProgressMsg(line): default: return }
+			}
+
+			err := cmd.Wait()
+			if isCompressed {
+				ok := (err == nil)
+				if ok {
+					// Also compute sha256 for the compressed file to record actual
+					finalHash = ""
+					select { case progressChan <- ProgressMsg("Integrity OK. Computing SHA-256 of compressed file..."): default: }
+					hashCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; pv -f '%s' | sha256sum", imagePath))
+					hashPty, herr := pty.Start(hashCmd)
+					if herr != nil {
+						// Save ok status without actual if hashing can't start
+						_ = saveIntegrityResult(imagePath, IntegrityEntry{ Type: "compressed", Method: "xz -tv", Status: "ok", CheckedAt: time.Now().Format(time.RFC3339) })
+						select { case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to start sha256sum: %v", herr)}: default: }
+						select { case progressChan <- CheckCompletedMsg{File: imagePath, Ok: true}: default: }
+						return
+					}
+					// Announce new step so Abort can target the right process
+					progressChan <- CheckStartedMsg{Cmd: hashCmd, Pty: hashPty}
+
+					// Scan hash progress and capture final hash
+					hScanner := bufio.NewScanner(hashPty)
+					hScanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+						if i := bytes.IndexAny(data, "\r\n"); i >= 0 { return i + 1, data[:i], nil }
+						if atEOF && len(data) > 0 { return len(data), data, nil }
+						return 0, nil, nil
+					})
+					for hScanner.Scan() {
+						line := strings.TrimSpace(hScanner.Text())
+						if line == "" { continue }
+						if hashRe.MatchString(line) {
+							fields := strings.Fields(line)
+							if len(fields) > 0 { finalHash = fields[0] }
+						}
+						select { case progressChan <- ProgressMsg(line): default: }
+					}
+					_ = hashCmd.Wait()
+					_ = hashPty.Close()
+
+					// Save ok status with actual hash (if captured)
+					if werr := saveIntegrityResult(imagePath, IntegrityEntry{ Type: "compressed", Method: "xz -tv", Status: "ok", CheckedAt: time.Now().Format(time.RFC3339), Actual: finalHash }); werr != nil {
+						select { case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to write integrity.yaml: %v", werr)}: default: }
+					} else {
+						select { case progressChan <- ProgressMsg(fmt.Sprintf("Saved integrity record to %s", filepath.Join(filepath.Dir(imagePath), "integrity.yaml"))): default: }
+					}
+					select { case progressChan <- CheckCompletedMsg{File: imagePath, Ok: true}: default: }
+					return
+				}
+
+				// Failed xz -tv: compute sha256sum to capture actual checksum
+				select { case progressChan <- ProgressMsg("Integrity failed. Computing SHA-256 of compressed file..."): default: }
+				hashCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; pv -f '%s' | sha256sum", imagePath))
+				hashPty, herr := pty.Start(hashCmd)
+				if herr != nil {
+					// Couldn't start hashing; still save failed status without actual
+					_ = saveIntegrityResult(imagePath, IntegrityEntry{ Type: "compressed", Method: "xz -tv", Status: "failed", CheckedAt: time.Now().Format(time.RFC3339) })
+					select { case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to start sha256sum: %v", herr)}: default: }
+					select { case progressChan <- CheckCompletedMsg{File: imagePath, Ok: false}: default: }
+					return
+				}
+				// Announce new step so Abort can target the right process
+				progressChan <- CheckStartedMsg{Cmd: hashCmd, Pty: hashPty}
+
+				// Scan hash progress and capture final hash
+				hScanner := bufio.NewScanner(hashPty)
+				hScanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+					if i := bytes.IndexAny(data, "\r\n"); i >= 0 { return i + 1, data[:i], nil }
+					if atEOF && len(data) > 0 { return len(data), data, nil }
+					return 0, nil, nil
+				})
+				for hScanner.Scan() {
+					line := strings.TrimSpace(hScanner.Text())
+					if line == "" { continue }
+					if hashRe.MatchString(line) {
+						fields := strings.Fields(line)
+						if len(fields) > 0 { finalHash = fields[0] }
+					}
+					select { case progressChan <- ProgressMsg(line): default: }
+				}
+				_ = hashCmd.Wait()
+				_ = hashPty.Close()
+
+				// Save failed status with actual hash (if captured)
+				if werr := saveIntegrityResult(imagePath, IntegrityEntry{ Type: "compressed", Method: "xz -tv", Status: "failed", CheckedAt: time.Now().Format(time.RFC3339), Actual: finalHash }); werr != nil {
+					select { case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to write integrity.yaml: %v", werr)}: default: }
+				} else {
+					select { case progressChan <- ProgressMsg(fmt.Sprintf("Saved integrity record to %s", filepath.Join(filepath.Dir(imagePath), "integrity.yaml"))): default: }
+				}
+				select { case progressChan <- CheckCompletedMsg{File: imagePath, Ok: false}: default: }
+				return
+			}
+
+			// Raw image
+			status := "computed"
+			ok := false
+			if haveExpected && finalHash != "" && strings.EqualFold(finalHash, expectedFromSidecar) && err == nil {
+				status = "ok"
+				ok = true
+			} else if haveExpected {
+				status = "failed"
+			}
+			if werr := saveIntegrityResult(imagePath, IntegrityEntry{ Type: "raw", Method: "sha256sum", Status: status, CheckedAt: time.Now().Format(time.RFC3339), Expected: expectedFromSidecar, Actual: finalHash }); werr != nil {
+				select { case progressChan <- ErrorMsg{Err: fmt.Errorf("failed to write integrity.yaml: %v", werr)}: default: }
+			} else {
+				select { case progressChan <- ProgressMsg(fmt.Sprintf("Saved integrity record to %s", filepath.Join(filepath.Dir(imagePath), "integrity.yaml"))): default: }
+			}
+			select { case progressChan <- CheckCompletedMsg{File: imagePath, Ok: ok}: default: }
+		}()
+
+		return nil
+	}
+}
+
+// --- integrity.yaml persistence ---
+
+type IntegrityFile struct { Files map[string]IntegrityEntry `yaml:"files"` }
+
+type IntegrityEntry struct {
+	Type      string `yaml:"type"`
+	Method    string `yaml:"method"`
+	Status    string `yaml:"status"`
+	CheckedAt string `yaml:"checked_at"`
+	Expected  string `yaml:"expected,omitempty"`
+	Actual    string `yaml:"actual,omitempty"`
+}
+
+func saveIntegrityResult(imagePath string, entry IntegrityEntry) error {
+	dir := filepath.Dir(imagePath)
+	yamlPath := filepath.Join(dir, "integrity.yaml")
+
+	var doc IntegrityFile
+	if b, err := os.ReadFile(yamlPath); err == nil {
+		_ = yaml.Unmarshal(b, &doc)
+	}
+	if doc.Files == nil { doc.Files = make(map[string]IntegrityEntry) }
+	doc.Files[filepath.Base(imagePath)] = entry
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil { return err }
+	tmp := yamlPath + ".tmp"
+	if err := os.WriteFile(tmp, out, 0644); err != nil { return err }
+	return os.Rename(tmp, yamlPath)
+}
+
+func ternary[T any](cond bool, a, b T) T { if cond { return a }; return b }

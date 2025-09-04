@@ -4,3 +4,5 @@ husarion-os-flasher
 *.img 
 *.img.xz
 *.img.part
+*.checksum
+integrity.yaml

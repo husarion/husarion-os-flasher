@@ -50,6 +50,18 @@ type (
 		Cmd *exec.Cmd
 		Pty *os.File
 	}
+
+	// CheckStartedMsg is sent when integrity check starts
+	CheckStartedMsg struct {
+		Cmd *exec.Cmd
+		Pty *os.File
+	}
+
+	// CheckCompletedMsg is sent when integrity check finishes
+	CheckCompletedMsg struct {
+		File string
+		Ok   bool
+	}
 )
 
 // ListenProgress returns a command that listens for messages on a channel
