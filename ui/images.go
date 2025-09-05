@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,77 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// --- added helpers (no xz --robot; parse human xz -l output) ---
+// parseHumanSize converts "<num>[.<num>] <UNIT>" (with optional commas) to bytes.
+func parseHumanSize(num, unit string) (int64, bool) {
+	num = strings.ReplaceAll(num, ",", "")
+	f, err := strconv.ParseFloat(num, 64)
+	if err != nil {
+		return 0, false
+	}
+	multipliers := map[string]float64{
+		"B": 1,
+		"KiB": 1024,
+		"MiB": 1024 * 1024,
+		"GiB": 1024 * 1024 * 1024,
+		"TiB": 1024 * 1024 * 1024 * 1024,
+	}
+	unit = strings.TrimSpace(unit)
+	m, ok := multipliers[unit]
+	if !ok {
+		// Sometimes xz prints just "B" or already suffixed like "1234B"
+		if strings.HasSuffix(num, "B") {
+			trim := strings.TrimSuffix(num, "B")
+			f2, err2 := strconv.ParseFloat(trim, 64)
+			if err2 == nil {
+				return int64(f2), true
+			}
+		}
+		return 0, false
+	}
+	return int64(f * m), true
+}
+
+// getUncompressedSizeFromXZ runs `xz -l` and extracts the uncompressed size.
+// Returns (bytes, exact).
+func getUncompressedSizeFromXZ(path string) (int64, bool) {
+	out, err := exec.Command("xz", "-l", path).CombinedOutput()
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(string(out), "\n")
+	filename := filepath.Base(path)
+	sizeRe := regexp.MustCompile(`([0-9][0-9,]*\.?[0-9]*)\s*(B|KiB|MiB|GiB|TiB)`)
+	for _, line := range lines {
+		if !strings.Contains(line, filename) {
+			continue
+		}
+		// Find all size occurrences (compressed, uncompressed, maybe more)
+		matches := sizeRe.FindAllStringSubmatch(line, -1)
+		if len(matches) >= 2 {
+			// Second match is uncompressed.
+			if val, ok := parseHumanSize(matches[1][1], matches[1][2]); ok {
+				return val, true
+			}
+		}
+	}
+	// Fallback: try last non-empty numeric line (totals)
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		matches := sizeRe.FindAllStringSubmatch(line, -1)
+		if len(matches) >= 2 {
+			if val, ok := parseHumanSize(matches[1][1], matches[1][2]); ok {
+				return val, true
+			}
+		}
+	}
+	return 0, false
+}
+// --- end helpers ---
 
 func GetImageFiles(osImgPath string) ([]string, error) {
 	// Use osImgPath instead of hardcoded "/os-images"
@@ -73,64 +145,41 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 
 			progressChan <- ProgressMsg("Preparing to flash compressed image...")
 
-			// Get the uncompressed size using xz -l
-			sizeCmd := exec.Command("xz", "-l", src)
-			output, err := sizeCmd.Output()
-
-			var uncompressedSizeBytes int64
-			if err == nil {
-				// Parse the tabular output from xz -l
-				lines := strings.Split(string(output), "\n")
-				if len(lines) >= 2 { // Need at least header and data line
-					dataLine := lines[1] // Second line contains the data
-					fields := strings.Fields(dataLine)
-
-					// Find the uncompressed size (column 4) and unit (part of the same value or next field)
-					if len(fields) >= 5 {
-						sizeStr := fields[3] // Uncompressed size value
-						unitStr := fields[4] // Unit (GiB, MiB, etc.)
-
-						// Parse the size, removing commas if present
-						sizeValue, err := strconv.ParseFloat(strings.ReplaceAll(sizeStr, ",", ""), 64)
-						if err == nil && unitStr == "GiB" {
-							// Convert GiB to bytes
-							uncompressedSizeBytes = int64(sizeValue * 1024 * 1024 * 1024)
-						} else if err == nil && unitStr == "MiB" {
-							// Convert MiB to bytes
-							uncompressedSizeBytes = int64(sizeValue * 1024 * 1024)
-						}
-					}
+			// Replace previous --robot parsing: use human output only
+			uncompressedSizeBytes, exact := getUncompressedSizeFromXZ(src)
+			if !exact {
+				// Fallback: estimate from compressed size
+				if fi, fe := os.Stat(src); fe == nil {
+					uncompressedSizeBytes = fi.Size() * 4 // heuristic
+					progressChan <- ProgressMsg("Uncompressed size estimated (xz -l parse failed)")
+				} else {
+					progressChan <- ProgressMsg("Unable to stat file for size estimation; progress will be free-running")
 				}
-			}
-
-			// If we couldn't get the size from xz -l, estimate it from the compressed size
-			if uncompressedSizeBytes == 0 {
-				fileInfo, err := os.Stat(src)
-				if err == nil {
-					// Use a 5x multiplier as a reasonable estimate for disk images
-					uncompressedSizeBytes = fileInfo.Size() * 5
-					progressChan <- ProgressMsg("Using estimated uncompressed size for progress tracking")
-				}
+			} else {
+				progressChan <- ProgressMsg("Uncompressed size detected: " + util.FormatBytes(uncompressedSizeBytes))
 			}
 
 			if uncompressedSizeBytes > 0 {
-				// Use pv with size parameter for accurate progress reporting
-				progressChan <- ProgressMsg(fmt.Sprintf("Decompressing and flashing (size: %s)...",
-					util.FormatBytes(uncompressedSizeBytes)))
+				tag := "size (exact)"
+				if !exact {
+					tag = "size (estimated)"
+				}
+				progressChan <- ProgressMsg(fmt.Sprintf("Decompressing and flashing (%s: %s)...",
+					tag, util.FormatBytes(uncompressedSizeBytes)))
 
-				// Use bash explicitly instead of sh for pipefail support
-				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f -s %d | dd of=%s bs=16M",
-					src, uncompressedSizeBytes, dst))
+				cmd = exec.Command("bash", "-c",
+					fmt.Sprintf("set -o pipefail; xz -dc %q 2>/tmp/xz_error | pv -f -s %d | dd of=%q bs=16M oflag=direct status=none",
+						src, uncompressedSizeBytes, dst))
 			} else {
-				// Fallback if we couldn't determine the size
 				progressChan <- ProgressMsg("Decompressing and flashing (no size info)...")
-				// Use bash explicitly instead of sh for pipefail support
-				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f | dd of=%s bs=16M",
-					src, dst))
+				cmd = exec.Command("bash", "-c",
+					fmt.Sprintf("set -o pipefail; xz -dc %q 2>/tmp/xz_error | pv -f | dd of=%q bs=16M oflag=direct status=none",
+						src, dst))
 			}
 		} else {
-			// Standard uncompressed image - also switch to bash for consistency
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("pv -f %s | dd of=%s bs=16M", src, dst))
+			// Standard uncompressed image
+			cmd = exec.Command("bash", "-c",
+				fmt.Sprintf("pv -f %q | dd of=%q bs=16M oflag=direct status=none", src, dst))
 		}
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
@@ -164,7 +213,7 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 
 			// Track last progress to detect hangs
 			lastProgressTime := time.Now()
-			progressTimeout := 60 * time.Second // 60 seconds without progress = timeout
+			progressTimeout := 120 * time.Second // 120 seconds without progress = timeout
 
 			for {
 				select {
