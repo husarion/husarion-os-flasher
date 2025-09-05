@@ -119,18 +119,18 @@ func WriteImage(src, dst string, progressChan chan tea.Msg) tea.Cmd {
 					util.FormatBytes(uncompressedSizeBytes)))
 
 				// Use bash explicitly instead of sh for pipefail support
-				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f -s %d | dd of=%s bs=1k",
+				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f -s %d | dd of=%s bs=16M",
 					src, uncompressedSizeBytes, dst))
 			} else {
 				// Fallback if we couldn't determine the size
 				progressChan <- ProgressMsg("Decompressing and flashing (no size info)...")
 				// Use bash explicitly instead of sh for pipefail support
-				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f | dd of=%s bs=1k",
+				cmd = exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; xz -dc %s 2>/tmp/xz_error | pv -f | dd of=%s bs=16M",
 					src, dst))
 			}
 		} else {
 			// Standard uncompressed image - also switch to bash for consistency
-			cmd = exec.Command("bash", "-c", fmt.Sprintf("pv -f %s | dd of=%s bs=1k", src, dst))
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("pv -f %s | dd of=%s bs=16M", src, dst))
 		}
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
